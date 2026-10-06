@@ -71,8 +71,11 @@ def run_gsr_pipeline(adata, set2conditions, a0: CoexpressGraph, gene_list, cfg: 
     from .refine import refine_graph
     from .views import build_views, response_profiles, undirected_simple
 
+    from .utils import describe_device
+
     g = cfg.gsr
     n = len(gene_list)
+    logger.info("GSR graph learning on %s", describe_device(device))
     with phase("gsr/data", timings):
         tc = build_training_cells(adata, set2conditions, cfg.seed, g.h1_frac)
     with phase("gsr/views", timings):

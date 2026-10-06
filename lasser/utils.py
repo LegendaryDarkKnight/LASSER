@@ -36,6 +36,16 @@ def resolve_device(device: str) -> torch.device:
     return torch.device(device)
 
 
+def describe_device(device) -> str:
+    """'cuda:0 (Tesla T4, 14.7 GB)' or 'cpu' - for logs."""
+    device = torch.device(device)
+    if device.type != "cuda":
+        return "cpu"
+    idx = device.index if device.index is not None else torch.cuda.current_device()
+    props = torch.cuda.get_device_properties(idx)
+    return f"cuda:{idx} ({props.name}, {props.total_memory / 2**30:.1f} GB)"
+
+
 @contextlib.contextmanager
 def phase(name: str, timings: Optional[Dict[str, Dict[str, float]]] = None) -> Iterator[None]:
     """Log a phase's wall time and peak CUDA memory; optionally record them in ``timings``."""

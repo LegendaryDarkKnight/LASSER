@@ -25,11 +25,12 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, List, Optional
 
+import pandas as pd
 import torch
 
 from .config import LasserConfig
 from .tracking import RunTracker, graph_record, parse_gears_output, write_json
-from .utils import capture_stderr, phase, resolve_device, seed_everything
+from .utils import capture_stderr, describe_device, phase, resolve_device, seed_everything
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,10 @@ def prepare(cfg: LasserConfig, pert_data=None, tracker: Optional[RunTracker] = N
     gears_log = tracker.gears_log if tracker else None
     seed_everything(cfg.seed, cfg.deterministic)
     device = resolve_device(cfg.device)
+    logger.info("device: %s (GEARS training%s)", describe_device(device),
+                " and GSR graph learning" if cfg.graph_learning else "")
+    if device.type == "cpu" and torch.cuda.is_available():
+        logger.warning("running on CPU although CUDA is available (cfg.device=%r)", cfg.device)
 
     with capture_stderr(lines, gears_log):
         if pert_data is None:
@@ -193,10 +198,19 @@ def _train_evaluate_save(ctx: RunContext, tracker: RunTracker) -> Dict[str, Any]
                                                     "history": ctx.graph.info.get("history")})
 
     lines: List[str] = []
+    logger.info("training GEARS on %s for %d epochs", describe_device(ctx.device), cfg.epochs)
     with phase("gears_train", ctx.timings), capture_stderr(lines, tracker.gears_log):
         g.train(epochs=cfg.epochs, lr=cfg.lr, weight_decay=cfg.weight_decay)
     ctx.gears_lines += lines
-    parsed = parse_gears_output(lines)
+    # Save the trained model first, so nothing after this point can lose the training.
+    g.save_model(tracker.path("checkpoints", "gears_model"))  # GEARS format: config.pkl + model.pt (best model)
+    with open(tracker.path("metrics", "gears_output.txt"), "w") as f:
+        f.write("\n".join(lines) + "\n")
+    try:
+        parsed = parse_gears_output(lines)
+    except Exception:  # bookkeeping only; never fail a trained run on it
+        logger.exception("could not parse GEARS's training printout; raw text is in metrics/gears_output.txt")
+        parsed = {"epochs": pd.DataFrame(), "gears_test": {}}
     tracker.save_epoch_log(parsed["epochs"])
 
     with phase("evaluate", ctx.timings):
@@ -204,7 +218,6 @@ def _train_evaluate_save(ctx: RunContext, tracker: RunTracker) -> Dict[str, Any]
     metrics["gears_inference"] = parsed["gears_test"]
     tracker.save_test_metrics(metrics)
     tracker.save_predictions(preds)
-    g.save_model(tracker.path("checkpoints", "gears_model"))  # GEARS format: config.pkl + model.pt (best model)
 
     finished = _dt.datetime.now().isoformat(timespec="seconds")
     tracker.save_env(finished=finished)
@@ -214,7 +227,7 @@ def _train_evaluate_save(ctx: RunContext, tracker: RunTracker) -> Dict[str, Any]
         "run_id": tracker.run_id, "timestamp": tracker.started, "dataset": cfg.dataset, "split": cfg.split,
         "seed": cfg.seed, "graph_learning": cfg.graph_learning, "gsr_init_gene_emb": cfg.gsr_init_gene_emb,
         "epochs": cfg.epochs, "subsample_cells_per_condition": cfg.subsample_cells_per_condition,
-        "run_tag": cfg.run_tag, "config_hash": tracker.config_hash, "split_hash": tracker.split_hash,
+        "run_tag": cfg.run_tag, "device": describe_device(ctx.device), "config_hash": tracker.config_hash, "split_hash": tracker.split_hash,
         "graph_source": source, **{f"graph_{k}": v for k, v in rec["stats"].items()},
     }
     if ctx.graph is not None:

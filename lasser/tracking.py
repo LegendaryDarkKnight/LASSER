@@ -184,6 +184,7 @@ class RunTracker:
     def save_env(self, finished: Optional[str] = None) -> None:
         gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
         write_json(self.path("env.json"), {
+            "device": self.cfg.device,
             "python": sys.version,
             "platform": platform.platform(),
             "torch": torch.__version__,
@@ -245,11 +246,14 @@ class RunTracker:
 
 
 # --------------------------------------------------------------------- GEARS log
-_RE_STEP = re.compile(r"Epoch (\d+) Step (\d+) Train Loss: ([-\d.eE+naif]+)")
-_RE_EPOCH = re.compile(r"Epoch (\d+): Train Overall MSE: ([-\d.eE+naif]+) Validation Overall MSE: ([-\d.eE+naif]+)")
-_RE_DE = re.compile(r"Train Top 20 DE MSE: ([-\d.eE+naif]+) Validation Top 20 DE MSE: ([-\d.eE+naif]+)")
-_RE_TEST_DE = re.compile(r"Best performing model: Test Top 20 DE MSE: ([-\d.eE+naif]+)")
-_RE_TEST_SUB = re.compile(r"^test_(.+?): ([-\d.eE+naif]+)$")
+# A number as GEARS prints it. GEARS ends some values with a full stop
+# ("Validation Overall MSE: 0.0381. "), so the pattern must not swallow a trailing ".".
+_NUM = r"([-+]?(?:\d+(?:\.\d+)?(?:[eE][-+]?\d+)?|nan|inf))"
+_RE_STEP = re.compile(r"Epoch (\d+) Step (\d+) Train Loss: " + _NUM)
+_RE_EPOCH = re.compile(r"Epoch (\d+): Train Overall MSE: " + _NUM + r"\.? Validation Overall MSE: " + _NUM)
+_RE_DE = re.compile(r"Train Top 20 DE MSE: " + _NUM + r"\.? Validation Top 20 DE MSE: " + _NUM)
+_RE_TEST_DE = re.compile(r"Best performing model: Test Top 20 DE MSE: " + _NUM)
+_RE_TEST_SUB = re.compile(r"^test_(.+?): " + _NUM + r"\.?$")
 
 
 def parse_gears_output(lines: List[str]) -> Dict[str, Any]:

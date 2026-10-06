@@ -71,9 +71,19 @@ def build_training_cells(adata, set2conditions: Dict[str, list], seed: int, h1_f
 
 
 def rows_csr(adata, idx: np.ndarray) -> sp.csr_matrix:
+    """Rows ``idx`` of ``adata.X`` as a canonical float32 CSR matrix.
+
+    Canonical = sorted column indices, no duplicate entries, no stored zeros. Sparse
+    products (SVD, group means) sum entries in storage order, so without this the same
+    numbers stored in a different order give results that differ in the last bits.
+    """
     X = adata.X
     X = X[idx] if sp.issparse(X) else sp.csr_matrix(np.asarray(X)[idx])
-    return sp.csr_matrix(X, dtype=np.float32)
+    X = sp.csr_matrix(X, dtype=np.float32, copy=True)
+    X.sum_duplicates()
+    X.eliminate_zeros()
+    X.sort_indices()
+    return X
 
 
 def group_means(X: sp.csr_matrix, labels: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:

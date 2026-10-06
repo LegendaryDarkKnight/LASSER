@@ -25,7 +25,36 @@ What run 01 showed before the failure. These come from the leakage test's GSR ru
 
 The S count means about 4.4k genes have no non-self edge in GEARS's A0 (|r| > 0.4 is rare in single cells), so A0 is mostly self-loops. Confirm this on the next run from `graph_isolated_genes` in `runs.csv`. If it holds, the `d_min` top-up adds edges for most genes, which matters for interpreting results.
 
-**Next:** re-run notebook cells 1–3 (and 3b) with the fixes and send the output.
+**Run 02 (2026-10-06, `notebooks/run-lasser_02.ipynb`, commit `c7be65c`).**
+
+Passed:
+- `test_01_parity::test_graph_and_init_identical` and `::test_first_training_steps_identical`: flag-off lasser is identical to the vendored GEARS on graph, GO graph, initial state and the first 5 losses.
+- Everything up to the end of GEARS training, in every run.
+
+Failed, now fixed:
+
+1. `ValueError: could not convert string to float: '0.0099.'`, in every run (tests, smoke, and the notebook baseline after 86 minutes of training).
+   - Cause: GEARS prints `Validation Overall MSE: 0.0381. `, and the number pattern in `tracking.py` also captured the trailing full stop.
+   - Fix: a strict number pattern. Also, (a) the GEARS checkpoint is now saved straight after `train()`, before anything else; (b) the raw printout is saved to `metrics/gears_output.txt`; (c) a parse failure is logged and no longer fails the run.
+   - New `tests/test_05_parsing.py` checks the parser on real run-02 lines without needing data.
+2. Leakage test: "view E changed".
+   - Cause: the test's altered matrix (`sp.diags(...) @ X[perm]`) stores entries in a different order. Sparse SVD and k-means sum in storage order, so results differed in the last bits.
+   - Fix: `data.rows_csr` now returns a canonical CSR (sorted indices, no duplicates, no stored zeros). `GSR_CACHE_VERSION` was bumped to 2.
+
+Also added: the device is logged before anything runs (`device: cuda:0 (Tesla T4, ...)` or `cpu`, with a warning if CPU is used while CUDA is available). It is also logged at the start of GSR and of training, and recorded in `runs.csv` (`device`) and `env.json`.
+
+What run 02 measured (smoke test: full Norman, T4):
+
+- **A0 confirmed:** 6,364 edges, 4,699 of them self-loops; **4,419 of 5,045 genes have no co-expression neighbour**.
+- GEARS training: about 6 min per epoch on the full data (20 epochs = 5,160 s); peak CUDA memory 0.87 GB.
+- GSR with default config: about 25 s in total; peak CUDA memory 1.6 GB, within the 4 GB budget.
+  - Positives: 564 pairs.
+  - Link AUC: 0.988 (raw features 0.970).
+  - Refinement: 20 A0 edges removed and 38,848 directed edges added; every gene now has a neighbour.
+  - H2 hit rate: added edges 0.036, degree-matched random 0.002, A0 0.58. So the check passes, but the added edges are weakly co-expressed.
+- **Issue to discuss (not fixed):** in the S view, every gene that is isolated in A0 (88% of genes) gets the same "missing" input. They all end up with identical S embeddings, so the S-view link AUC is about 0.23 (below chance). In refinement, the S term is constant for pairs of such genes. The same applies to E and R missing genes. Options: score only views where both genes are non-missing, renormalising β per pair; or drop S, since A0 is nearly empty.
+
+**Next:** push, re-run notebook cells 1–3 (and 3b), and send the output. Decide what to do about the missing-gene / S-view issue.
 
 ## Decisions made with the user
 

@@ -134,11 +134,14 @@ out_dir/
              test_metrics.json               eval.py: paper + LASSER metrics, overall and per subgroup; GEARS's own
              predictions.pkl                 mean pred/true per test perturbation, gene order, ctrl, counts
              timings.json                    seconds and peak CUDA memory per phase
+             gears_output.txt                GEARS's raw training/test printout (source of epoch_log.csv)
     checkpoints/ gears_model/{config.pkl,model.pt}     GEARS format (GEARS.load_pretrained works)
                  gsr_encoders.pt             pretrained encoders, embeddings, pretraining history
 ```
 
 The graph pickle is a dict with these keys: `edge_index`, `edge_weight` (numpy), `gene_list`, `node_map`, `source` (`gears_static` / `gsr_refined`), `seed`, `split_hash`, `config_hash`, and `stats` (edges, self-loops, in-degree min/median/mean/max/Gini, isolated genes).
+
+The device (`cuda:0 (<GPU name>, <memory>)` or `cpu`) is logged before anything runs, again when GSR and training start, and stored in `runs.csv` (`device`) and `env.json`. The GEARS checkpoint is written straight after training, before metrics are parsed or computed.
 
 `epoch_log.csv` is parsed from GEARS's printout, because its training loop reports nothing else. So the train loss column is the mean of the losses GEARS prints every 50 steps.
 
@@ -171,6 +174,7 @@ It then calls `evaluate_streaming` and `paper_summary` on GEARS's `best_model`.
 | `test_02_graphs.py` | 4: saved graph = model's graph (both flags). 5: valid indices, node order, float32 weights ≥ 0, every gene in-degree ≥ `d_min`, kept A0 edges first |
 | `test_03_leakage.py` | 6: validation/test cells permuted and rescaled: identical A0, views, positives, embeddings and refined graph |
 | `test_04_cache_tracking.py` | 7: cache hit returns identical tensors. 8: every file exists, `runs.csv` has the rows, `load_run` reads them. Also checks the `eval.py` copy |
+| `test_05_parsing.py` | GEARS printout parsing on real lines (no data needed) |
 | `test_09_smoke.py` | 9: full Norman, 1 epoch, flag off and on, peak memory < 15 GB, GSR < 4 GB (`LASSER_SMOKE=1`) |
 
 Environment variables: `LASSER_DATA_DIR`, `LASSER_TEST_DIR`, `LASSER_SUBSAMPLE` (default 4 cells per condition), `LASSER_SMOKE`.

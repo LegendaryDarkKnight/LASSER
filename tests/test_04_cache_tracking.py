@@ -12,7 +12,8 @@ from lasser import load_run
 
 BASE_FILES = ["run.log", "config.json", "env.json", "splits/split.json", "splits/split_hash.txt",
               "graphs/coexpress_graph.pkl", "metrics/epoch_log.csv", "metrics/test_metrics.json",
-              "metrics/predictions.pkl", "checkpoints/gears_model/model.pt"]
+              "metrics/predictions.pkl", "metrics/gears_output.txt", "metrics/timings.json",
+              "checkpoints/gears_model/model.pt"]
 GSR_FILES = ["graphs/a0_graph.pkl", "graphs/edits.csv", "graphs/checks.json", "checkpoints/gsr_encoders.pt"]
 
 

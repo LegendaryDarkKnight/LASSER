@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
 # Bump when a change to the GSR pipeline should invalidate cached graphs.
-GSR_CACHE_VERSION = 1
+GSR_CACHE_VERSION = 2  # 2: canonical CSR input (run 02)
 
 # Fields that say *where* or *how loudly* a run happens, not *what* it computes.
 _NON_SEMANTIC = {"data_dir", "out_dir", "cache_dir", "log_level", "repo_dir", "device", "run_tag"}
