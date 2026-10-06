@@ -2,7 +2,7 @@
 
 Call order (the "reference protocol" the flag-off parity test reproduces with plain GEARS):
 
-    import gears                         # GEARS seeds torch with 0 at import
+    import lasser.gears                  # vendored GEARS; seeds torch with 0 at import
     seed_everything(seed)
     pert_data = PertData(data_dir); pert_data.load(dataset)
     pert_data.prepare_split(split, seed, train_gene_set_size)
@@ -47,7 +47,7 @@ class RunContext:
 
 def load_pert_data(cfg: LasserConfig):
     """GEARS's PertData for ``cfg.dataset`` (a GEARS dataset name, or a processed-data folder)."""
-    from gears import PertData
+    from .gears import PertData
 
     os.makedirs(cfg.data_dir, exist_ok=True)
     pert_data = PertData(cfg.data_dir)
@@ -104,7 +104,7 @@ def init_gene_embedding(gears_obj, emb: torch.Tensor) -> Dict[str, float]:
 
 def prepare(cfg: LasserConfig, pert_data=None, tracker: Optional[RunTracker] = None) -> RunContext:
     """Everything up to (and including) ``model_initialize``."""
-    import gears  # noqa: F401  (GEARS seeds torch at import; import before seeding)
+    from . import gears as _gears  # noqa: F401  (GEARS seeds torch at import; import before seeding)
 
     cfg.validate()
     timings: Dict[str, Any] = {}
@@ -133,7 +133,7 @@ def prepare(cfg: LasserConfig, pert_data=None, tracker: Optional[RunTracker] = N
             timings["gsr_graph_from_cache"] = provider.from_cache
 
     seed_everything(cfg.seed, cfg.deterministic)
-    from gears import GEARS
+    from .gears import GEARS
 
     with phase("gears_init", timings), capture_stderr(lines, gears_log):
         gears_obj = GEARS(pert_data, device=cfg.device)

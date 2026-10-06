@@ -1,8 +1,9 @@
-"""Test 1: with graph_learning=False, lasser == plain GEARS from pip, exactly.
+"""Test 1: with graph_learning=False, lasser == plain GEARS, exactly.
 
-Runs on CPU so every op is deterministic and equality can be exact. The reference
-below uses only GEARS's public API plus the same seeds (see the call order in
-lasser/run.py); it does not call any lasser code.
+"Plain GEARS" is the vendored upstream copy in lasser/gears (see VENDORED.md), called
+directly through its public API with the same seeds (see the call order in
+lasser/run.py). The reference uses no other lasser code. Runs on CPU so every op is
+deterministic and equality can be exact.
 """
 
 import random
@@ -27,9 +28,9 @@ def _seed(s):
 
 
 def reference_gears(pert_data, cfg):
-    """Plain GEARS, as a user would run it from pip."""
-    import gears  # noqa: F401
-    from gears import GEARS
+    """Plain GEARS (vendored upstream copy), used the way the GEARS README does."""
+    import lasser.gears  # noqa: F401  (vendored GEARS; seeds torch at import)
+    from lasser.gears import GEARS
 
     _seed(cfg.seed)
     pert_data.prepare_split(split=cfg.split, seed=cfg.seed, train_gene_set_size=cfg.train_gene_set_size)
@@ -54,7 +55,7 @@ def _assert_same_state(a, b):
 
 def _train_steps(g, n, seed):
     """GEARS's own loop body (gears.py, train()), for the first n steps."""
-    from gears.utils import loss_fct
+    from lasser.gears.utils import loss_fct
 
     _seed(seed)
     model = g.model

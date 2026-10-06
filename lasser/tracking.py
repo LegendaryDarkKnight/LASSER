@@ -115,6 +115,11 @@ def _version(pkg: str) -> Optional[str]:
         return None
 
 
+def _vendored_gears_version() -> str:
+    from .gears.version import __version__
+    return f"{__version__} (snap-stanford/GEARS f374e43, vendored in lasser/gears)"
+
+
 class RunTracker:
     """Owns one run folder: logging, config/env/split/graph/metric files and runs.csv."""
 
@@ -184,7 +189,7 @@ class RunTracker:
             "torch": torch.__version__,
             "cuda": torch.version.cuda,
             "torch_geometric": _version("torch_geometric"),
-            "cell_gears": _version("cell-gears"),
+            "gears_vendored": _vendored_gears_version(),
             "numpy": np.__version__,
             "pandas": pd.__version__,
             "scanpy": _version("scanpy"),

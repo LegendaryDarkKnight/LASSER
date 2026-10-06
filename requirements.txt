@@ -1,0 +1,15 @@
+# lasser runtime dependencies. GEARS is vendored in lasser/gears, so cell-gears is NOT needed.
+# Kaggle already ships torch, numpy, pandas, scipy, scikit-learn, networkx, tqdm, requests;
+# the notebook installs only torch_geometric and scanpy.
+torch
+torch_geometric
+numpy
+pandas
+scipy
+scikit-learn
+scanpy        # also brings anndata (reads perturb_processed.h5ad)
+networkx
+tqdm
+requests
+# optional: dcor (GEARS GI analysis), wandb (GEARS weight_bias_track), seaborn + matplotlib (GEARS plot_perturbation)
+# tests: pytest

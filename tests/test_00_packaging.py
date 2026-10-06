@@ -1,4 +1,4 @@
-"""Tests 2 and 3: notebook packaging and flag-off import isolation.
+"""Tests 2 and 3: notebook packaging, flag-off import isolation, no external GEARS.
 
 ``lasser/`` alone is copied into a fresh temp dir; a subprocess started there imports
 it and runs a tiny flag-off experiment. Runs first (file name order) so the parent
@@ -29,8 +29,9 @@ SCRIPT = textwrap.dedent("""
                        graph_learning=False, run_tag="packaging")
     res = run_experiment(cfg)
     mods = sorted(m for m in sys.modules if m == "lasser" or m.startswith("lasser."))
+    pip_gears = sorted(m for m in sys.modules if m == "gears" or m.startswith("gears."))
     print("RESULT_JSON:" + json.dumps({{"lasser_file": lasser.__file__, "modules": mods,
-                                        "run_dir": res["run_dir"]}}))
+                                        "pip_gears": pip_gears, "run_dir": res["run_dir"]}}))
 """)
 
 
@@ -55,6 +56,12 @@ def test_packaging_imports_copied_folder(packaged_run):
     work, res = packaged_run
     assert os.path.realpath(res["lasser_file"]).startswith(os.path.realpath(work)), res["lasser_file"]
     assert os.path.exists(os.path.join(res["run_dir"], "metrics", "test_metrics.json"))
+
+
+def test_no_external_gears_package(packaged_run):
+    _, res = packaged_run
+    assert not res["pip_gears"], f"a top-level gears package was imported: {res['pip_gears']}"
+    assert "lasser.gears" in res["modules"]
 
 
 def test_flag_off_does_not_import_gsr_modules(packaged_run):

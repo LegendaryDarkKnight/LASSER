@@ -46,7 +46,7 @@ class StaticCoexpressProvider:
         self.cfg = cfg
 
     def build(self, pert_data) -> CoexpressGraph:
-        from gears.utils import GeneSimNetwork, get_similarity_network
+        from .gears.utils import GeneSimNetwork, get_similarity_network
 
         edge_list = get_similarity_network(network_type="co-express",
                                            adata=pert_data.adata,

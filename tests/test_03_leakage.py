@@ -33,7 +33,7 @@ def _perturb_heldout(adata, set2conditions, seed=0):
 
 
 def _a0(adata, pert_data, cfg, tag):
-    from gears.utils import GeneSimNetwork, get_coexpression_network_from_train
+    from lasser.gears.utils import GeneSimNetwork, get_coexpression_network_from_train
 
     root = os.path.join(TEST_DIR, "leakage_a0")
     os.makedirs(os.path.join(root, tag), exist_ok=True)
