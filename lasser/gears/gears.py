@@ -84,7 +84,7 @@ class GEARS:
         self.saved_logvar_sum = {}
         
         self.ctrl_expression = torch.tensor(
-            np.mean(self.adata.X[self.adata.obs.condition == 'ctrl'],
+            np.mean(self.adata.X[np.asarray(self.adata.obs.condition == 'ctrl')],  # LASSER: mask as ndarray (scipy >= 1.15)
                     axis=0)).reshape(-1, ).to(self.device)
         pert_full_id2pert = dict(self.adata.obs[['condition_name', 'condition']].values)
         self.dict_filter = {pert_full_id2pert[i]: j for i, j in

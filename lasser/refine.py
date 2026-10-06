@@ -126,7 +126,7 @@ def refine_graph(embs: Dict[str, torch.Tensor], a0_edge_index: torch.Tensor, a0_
 
     # 1. Remove: for each target gene, the fraction r_minus of its non-loop A0 edges with lowest E.
     keep = torch.ones(len(src), dtype=torch.bool, device=device)
-    nl = torch.flatnonzero(~loop)
+    nl = torch.nonzero(~loop, as_tuple=True)[0]
     if cfg.r_minus > 0 and len(nl):
         deg = torch.bincount(dst[nl], minlength=n)
         n_drop = torch.floor(deg.float() * cfg.r_minus).long()
@@ -186,7 +186,7 @@ def refine_graph(embs: Dict[str, torch.Tensor], a0_edge_index: torch.Tensor, a0_
     ei = torch.cat([torch.stack([src[keep], dst[keep]]), torch.stack([new_src, new_dst])], 1)
     ew = torch.cat([w0[keep], new_w])
 
-    removed = torch.flatnonzero(~keep)
+    removed = torch.nonzero(~keep, as_tuple=True)[0]
     action = np.array(["add", "topup"])
     edits = pd.concat([
         pd.DataFrame({"source": src[removed].cpu().numpy(), "target": dst[removed].cpu().numpy(),

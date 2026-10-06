@@ -45,7 +45,7 @@ def test_flag_on_shape_contract(runs, pert_data):
 
     loops = ei[0] == ei[1]
     deg = torch.bincount(ei[1][~loops], minlength=n)
-    low = torch.flatnonzero(deg < target)
+    low = torch.nonzero(deg < target, as_tuple=True)[0]
     print(f"in-degree (no self-loops): min {int(deg.min())}, median {float(deg.float().median())}, "
           f"max {int(deg.max())}; genes below d_min={target}: {len(low)}")
     assert len(low) == 0, f"genes below d_min: {low[:20].tolist()}"

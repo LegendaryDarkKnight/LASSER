@@ -8,6 +8,25 @@ Read this at the start of a new session. It records what has been built, what wa
 - **Nothing has been executed yet.** The only check was syntax parsing. All tests run on Kaggle; the user sends back the notebook output or `test_output.txt` after each run.
 - **Next step:** the user pushes to GitHub, sets `REPO_URL` in notebook cell 2 and runs cells 1–3 (tests). Then we fix whatever fails, starting with `test_01_parity.py`, the gate for everything else.
 
+## Kaggle run log
+
+**Run 01 (2026-10-06, `notebooks/run_lasser_01.ipynb`, Kaggle Python 3.13, commit `ab75303`).** All tests except the `eval.py` hash check failed or errored. There were two root causes, both now fixed:
+
+1. `'Series' object has no attribute 'nonzero'`: the vendored `GEARS.__init__` indexed the sparse `adata.X` with a pandas boolean Series, which the newer scipy rejects. The mask is now wrapped in `np.asarray(...)` (listed in VENDORED.md). The other `.X[...]` uses in the vendored code index with numpy arrays, and `adata[...]` indexing is handled by AnnData, so they're fine.
+2. `module 'torch' has no attribute 'flatnonzero'`: my bug in `refine.py` (and `tests/test_02_graphs.py`). Replaced with `torch.nonzero(..., as_tuple=True)[0]`. Every other `torch.*` name used was checked and exists.
+
+Also: `float(loss)` became `loss.item()` in pretraining (it caused a requires_grad warning).
+
+What run 01 showed before the failure. These come from the leakage test's GSR run on CPU with the tiny test config:
+
+- 49,849 training cells (38,824 in the A0 subset), 138 training perturbations.
+- Missing genes per view: E 234, R 271, **S 4419 of 5045**.
+- The pipeline ran through data, views, positives and pretraining without errors. Held-out link AUC was 0.97 against 0.83 for the raw features.
+
+The S count means about 4.4k genes have no non-self edge in GEARS's A0 (|r| > 0.4 is rare in single cells), so A0 is mostly self-loops. Confirm this on the next run from `graph_isolated_genes` in `runs.csv`. If it holds, the `d_min` top-up adds edges for most genes, which matters for interpreting results.
+
+**Next:** re-run notebook cells 1–3 (and 3b) with the fixes and send the output.
+
 ## Decisions made with the user
 
 1. **GEARS stays exactly as is**, including a known quirk. `GEARS_Model.forward` (`GEARS/gears/model.py:137-141`) runs the co-expression SGConv over B×N nodes (batch × genes), but `G_coexpress` only covers node ids 0..N-1. So only the first cell of each batch gets co-expression messages; the others get a self-loop only. The user chose to keep this rather than add a fix flag, and it is documented in LASSER.md. A learned graph therefore has limited effect by construction. Keep this in mind when reading results.

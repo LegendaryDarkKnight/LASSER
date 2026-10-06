@@ -370,8 +370,8 @@ def pretrain(views: Dict[str, ViewFeatures], positives: Positives, a0_undirected
                 z = model.encode(feats, missing, train_msg_full)
                 aucs = link_auc(z)
                 mon = {v: collapse_metrics(z[v], mon_sample) for v in names}
-            rec = {"step": step, "epoch": epoch, "loss": float(loss), "intra": float(l_intra),
-                   "inter": float(l_inter), "var": float(l_var),
+            rec = {"step": step, "epoch": epoch, "loss": loss.item(), "intra": l_intra.item(),
+                   "inter": l_inter.item(), "var": l_var.item(),
                    **{f"auc_{k}": v for k, v in aucs.items()},
                    **{f"{m}_{v}": mon[v][m] for v in names for m in mon[v]}}
             history.append(rec)
