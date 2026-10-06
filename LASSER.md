@@ -1,13 +1,13 @@
 # LASSER: running GEARS with a learned co-expression graph
 
-`lasser/` wraps GEARS (pip `cell-gears==0.1.2`). One flag, `graph_learning`, swaps GEARS's Pearson co-expression graph for a GSR-style refined graph (pretrain, then refine once, then train GEARS). The design is in `gsr_coexpression_plan.md`.
+`lasser/` is a self-contained package. GEARS is **vendored inside it** as `lasser/gears/` (upstream `snap-stanford/GEARS` commit `f374e43`, v0.1.2, with import and pandas-compatibility fixes only; see `lasser/gears/VENDORED.md`), so neither the pip `cell-gears` package nor a GEARS checkout is needed. One flag, `graph_learning`, swaps GEARS's Pearson co-expression graph for a GSR-style refined graph (pretrain, then refine once, then train GEARS). The design is in `gsr_coexpression_plan.md`.
 
 ## Running on Kaggle
 
 GPU (T4), **Internet on**. `notebooks/run_lasser.ipynb` contains these cells:
 
 ```python
-!pip install -q cell-gears==0.1.2 torch_geometric pytest
+!pip install -q torch_geometric scanpy pytest     # everything else is preinstalled on Kaggle
 !git clone https://github.com/<me>/<lasser-repo>.git /kaggle/working/lasser-repo
 !mv /kaggle/working/lasser-repo/lasser /kaggle/working/lasser
 
@@ -22,7 +22,19 @@ results = run_experiment(cfg, pert_data)     # or run_experiment(cfg)
 
 `lasser/` only uses relative imports and has no install step, so copying the folder next to the notebook is enough. The first run downloads Norman and the GO graph into `data_dir`. GEARS's processed cell graphs for Norman need about 4 GB of RAM.
 
-## How it fits into GEARS (no GEARS code is changed)
+## Dependencies
+
+| Package | Used by | Notes |
+|---|---|---|
+| torch | everything | preinstalled on Kaggle |
+| torch_geometric | GEARS model (`SGConv`), cell graphs and loaders, GSR encoders | `pip install torch_geometric` (pure Python; no pyg-lib or torch-cluster needed) |
+| scanpy (+ anndata) | GEARS data loading (`read_h5ad`) and DE ranking | `pip install scanpy` |
+| numpy, pandas, scipy, scikit-learn, networkx, tqdm, requests | GEARS and lasser | preinstalled on Kaggle |
+| dcor, wandb, seaborn, matplotlib | optional GEARS extras (GI analysis, wandb tracking, plots) | imported only inside those functions; not needed for lasser |
+
+The full list is in `requirements.txt`. `lasser` never imports a top-level `gears` package; a test checks this.
+
+## How it fits into GEARS (GEARS's behaviour is not changed)
 
 | Flag | What happens |
 |---|---|
@@ -30,7 +42,7 @@ results = run_experiment(cfg, pert_data)     # or run_experiment(cfg)
 | `graph_learning=True` | The GSR graph is built, then passed through GEARS's public `model_initialize(G_coexpress=..., G_coexpress_weight=...)`. The GO graph, model, loss, training loop and hyperparameters are unchanged. |
 | `gsr_init_gene_emb=True` | After `model_initialize`, a linear projection of the pretrained E-view embedding is copied into `model.gene_emb` (and `best_model.gene_emb`). |
 
-Seeding: `seed_everything(seed)` runs at the start and again right before `GEARS(...)`, so GEARS's initialisation and batch order are the same with the flag on or off. The parity test reproduces this order with plain GEARS (see `lasser/run.py`).
+Seeding: `seed_everything(seed)` runs at the start and again right before `GEARS(...)`, so GEARS's initialisation and batch order are the same with the flag on or off. The parity test reproduces this order by calling the vendored GEARS (`lasser.gears`) directly (see `lasser/run.py`).
 
 ### Behaviour inherited from GEARS
 
@@ -154,8 +166,8 @@ It then calls `evaluate_streaming` and `paper_summary` on GEARS's `best_model`.
 
 | File | Test |
 |---|---|
-| `test_00_packaging.py` | 3: `lasser/` copied alone into a temp dir, imported and run in a subprocess. 2: that flag-off run imports no GSR module |
-| `test_01_parity.py` | 1: flag off vs plain GEARS on CPU: identical graph, GO graph, initial `state_dict`, first 5 losses, and best model after 1 epoch (exact equality) |
+| `test_00_packaging.py` | 3: `lasser/` copied alone into a temp dir, imported and run in a subprocess. 2: that flag-off run imports no GSR module. Also checks that no top-level `gears` package is imported |
+| `test_01_parity.py` | 1: flag off vs the vendored GEARS called directly, on CPU: identical graph, GO graph, initial `state_dict`, first 5 losses, and best model after 1 epoch (exact equality) |
 | `test_02_graphs.py` | 4: saved graph = model's graph (both flags). 5: valid indices, node order, float32 weights ≥ 0, every gene in-degree ≥ `d_min`, kept A0 edges first |
 | `test_03_leakage.py` | 6: validation/test cells permuted and rescaled: identical A0, views, positives, embeddings and refined graph |
 | `test_04_cache_tracking.py` | 7: cache hit returns identical tensors. 8: every file exists, `runs.csv` has the rows, `load_run` reads them. Also checks the `eval.py` copy |

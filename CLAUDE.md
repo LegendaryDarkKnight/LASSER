@@ -11,12 +11,12 @@ Scope right now: **co-expression graph only.** The GO perturbation graph stays G
 | Path | What it is | How to treat it |
 |---|---|---|
 | `summarizer.md` | **Handoff summary**: status, decisions, package layout, deviations, next steps | Read first; keep it current |
-| `lasser/` | Our package (implemented) | Everything new goes here |
+| `lasser/` | Our package (implemented), **including the vendored GEARS in `lasser/gears/`** | Everything new goes here. Self-contained: never import an external `gears` |
 | `tests/` | pytest tests 1–9 from the spec | Run on Kaggle only |
 | `notebooks/run_lasser.ipynb` | Kaggle notebook: install → clone → tests → baseline → graph learning → results | The way everything is run |
 | `LASSER.md` | User docs: notebook steps, every config field, run-folder layout, `load_run` | Update it when behaviour or config changes |
-| `GEARS/` | Upstream GEARS source (`snap-stanford/GEARS`) | **Read-only reference** (git-ignored). At runtime GEARS comes from pip `cell-gears==0.1.2`. Don't edit it |
-| `WSDM23-GSR/` | GSR reference code (DGL-based) | **Read-only reference** (git-ignored). Port ideas to PyTorch + PyG; never import it or add DGL |
+| `GEARS/` | Upstream GEARS source (`snap-stanford/GEARS`, commit `f374e43`) | **Local read-only reference only** (git-ignored, never pushed, not used at runtime). The runtime copy is `lasser/gears/` |
+| `WSDM23-GSR/` | GSR reference code (DGL-based) | **Local read-only reference only** (git-ignored, never pushed). Port ideas to PyTorch + PyG; never import it or add DGL |
 | `s41587-023-01905-6.pdf` | GEARS paper (Nat Biotech 2024) | Model, data, splits and metric definitions |
 | `3539597.3570455.pdf` | GSR paper (WSDM 2023) | Pretrain → refine → finetune method |
 | `description.MD` | Project description | Project context |
@@ -27,8 +27,8 @@ Scope right now: **co-expression graph only.** The GO perturbation graph stays G
 ## Non-negotiables
 
 1. **`graph_learning=False` must reproduce upstream GEARS exactly**: same graph, initialisation, RNG stream and results. The flag-off parity test (`tests/test_01_parity.py`) must pass before any other work is considered done. The call and seeding order is documented at the top of `lasser/run.py`; don't reorder it.
-2. **`lasser/` is self-contained.** It is used by `git clone` → `mv <repo>/lasser .` → `import lasser` inside a Kaggle notebook. Use relative imports only, with no `sys.path` hacks, no repo-root paths and no install step. GSR modules (`data`, `views`, `pretrain`, `refine`, `checks`, `graph`) must be imported lazily, only when `graph_learning=True`.
-3. **Don't change GEARS behaviour.** The GO graph, `GEARS_Model.forward`, loss, training loop and default hyperparameters are untouched. The graph enters only through `model_initialize(G_coexpress=..., G_coexpress_weight=...)`. GEARS's co-expression batching quirk (only the first cell per batch gets graph messages) is **kept by the user's decision**; don't "fix" it unless asked.
+2. **`lasser/` is self-contained and independent of any external GEARS.** GEARS lives in `lasser/gears/` (vendored); import it only relatively (`from .gears import GEARS, PertData`, `from .gears.utils import ...`). Never import a top-level `gears`, never use pip `cell-gears`, never reference the `GEARS/` folder from code or tests. Edit `lasser/gears/` only for import or compatibility fixes that keep behaviour identical, mark each with `# LASSER:` and list it in `lasser/gears/VENDORED.md`. It is used by `git clone` → `mv <repo>/lasser .` → `import lasser` inside a Kaggle notebook. Use relative imports only, with no `sys.path` hacks, no repo-root paths and no install step. GSR modules (`data`, `views`, `pretrain`, `refine`, `checks`, `graph`) must be imported lazily, only when `graph_learning=True`.
+3. **Don't change GEARS behaviour** (in the vendored copy or around it). The GO graph, `GEARS_Model.forward`, loss, training loop and default hyperparameters are untouched. The graph enters only through `model_initialize(G_coexpress=..., G_coexpress_weight=...)`. GEARS's co-expression batching quirk (only the first cell per batch gets graph messages) is **kept by the user's decision**; don't "fix" it unless asked.
 4. **No data leakage.** Features, positives, the A0 graph and refinement use only control cells plus training-perturbation cells of the current split seed. Validation perturbations are used only for model selection. Test perturbations are never read before evaluation. `lasser/data.py::assert_training_only` enforces this.
 5. **Memory (Kaggle T4, 16 GB).** Never keep a dense N×N tensor in autograd, and build edge lists directly. No per-sample Python loops over a batch. Pretraining and refinement should use < 4 GB GPU memory.
 
@@ -62,9 +62,10 @@ A row is appended to `out_dir/runs.csv`. `lasser.load_run(path)` reads a run bac
 - Use Python `logging` (`logging.getLogger(__name__)`) for everything; no bare `print` in library code. GEARS's stderr output is captured with `utils.capture_stderr`.
 - All settings live in the `LasserConfig` / `GSRConfig` dataclasses. No hard-coded paths; defaults are Kaggle-friendly (`/kaggle/working/...`). Adding a `GSRConfig` field changes the GSR cache key automatically; bump `GSR_CACHE_VERSION` when the pipeline's logic changes.
 - Seed everything through `utils.seed_everything`. Tests use deterministic settings.
-- Dependencies are what GEARS already needs plus `torch_geometric` and `scikit-learn`. Ask before adding anything else (e.g. pyg-lib / torch-cluster are deliberately avoided).
+- Dependencies (`requirements.txt`): torch, torch_geometric, scanpy (+anndata), numpy, pandas, scipy, scikit-learn, networkx, tqdm, requests. On Kaggle only `torch_geometric scanpy pytest` are pip-installed. GEARS's optional extras (dcor, wandb, seaborn, matplotlib) must stay lazy imports. Ask before adding anything else (pyg-lib and torch-cluster are deliberately avoided).
+- After changing imports, run the static import audit (parse every file under `lasser/` with `ast`, check that relative imports resolve and that there is no top-level `gears` import). That is allowed locally; executing the code is not.
 - Keep functions small and typed. Shapes and node order follow GEARS's `node_map`.
-- Git: local repo, commit in small steps with clear messages. Don't push unless asked.
+- Git: local repo, commit in small steps with clear messages. Don't push unless asked. Keep `.gitignore` patterns for the reference folders anchored (`/GEARS/`, `/WSDM23-GSR/`); on case-insensitive Windows git an unanchored `GEARS/` would also ignore `lasser/gears/`.
 
 ## Working style
 

@@ -4,7 +4,7 @@ Read this at the start of a new session. It records what has been built, what wa
 
 ## Status (2026-10-06)
 
-- The `lasser/` package, `tests/`, `notebooks/run_lasser.ipynb` and `LASSER.md` are written and committed in a local git repo (6 commits on `master`, no remote yet).
+- The `lasser/` package, `tests/`, `notebooks/run_lasser.ipynb` and `LASSER.md` are written and committed in a local git repo (commits on `master`, no remote yet; GEARS vendored into `lasser/gears/` on 2026-10-06).
 - **Nothing has been executed yet.** The only check was syntax parsing. All tests run on Kaggle; the user sends back the notebook output or `test_output.txt` after each run.
 - **Next step:** the user pushes to GitHub, sets `REPO_URL` in notebook cell 2 and runs cells 1–3 (tests). Then we fix whatever fails, starting with `test_01_parity.py`, the gate for everything else.
 
@@ -12,12 +12,21 @@ Read this at the start of a new session. It records what has been built, what wa
 
 1. **GEARS stays exactly as is**, including a known quirk. `GEARS_Model.forward` (`GEARS/gears/model.py:137-141`) runs the co-expression SGConv over B×N nodes (batch × genes), but `G_coexpress` only covers node ids 0..N-1. So only the first cell of each batch gets co-expression messages; the others get a self-loop only. The user chose to keep this rather than add a fix flag, and it is documented in LASSER.md. A learned graph therefore has limited effect by construction. Keep this in mind when reading results.
 2. **Kaggle only.** Don't install packages, create a venv, download data or run tests or training locally. Static checks (`ast.parse`) are fine.
-3. GEARS is pinned to **`cell-gears==0.1.2`** from pip. It is identical to `GEARS/` except that pip's `model_initialize` has no `**kwargs`. pip doesn't declare `torch_geometric`, so the notebook installs it separately.
+3. **`lasser` is fully independent of any external GEARS.** GEARS is vendored as `lasser/gears/` (copied from `GEARS/gears`, commit `f374e43`, v0.1.2), and `lasser` never imports a top-level `gears` (pip `cell-gears` isn't installed or used). The `GEARS/` and `WSDM23-GSR/` folders are local references only, are git-ignored (patterns anchored as `/GEARS/` and `/WSDM23-GSR/`, because Windows git is case-insensitive and an unanchored `GEARS/` also hid `lasser/gears/`) and are never pushed. The GEARS MIT license is copied to `lasser/gears/LICENSE`. The vendored copy is upstream except for the fixes listed in `lasser/gears/VENDORED.md`, each marked `# LASSER:`:
+   - `dcor` is imported lazily;
+   - `torch_geometric.loader.DataLoader` replaces `torch_geometric.data.DataLoader`;
+   - two pandas-compatibility rewrites in `pertdata.py` that give the same results (the `prepare_split` groupby, and `.iloc[0]`).
+4. **Dependencies:**
+   - Runtime: torch, torch_geometric, scanpy (+anndata), numpy, pandas, scipy, scikit-learn, networkx, tqdm, requests (`requirements.txt`).
+   - Kaggle needs only `pip install torch_geometric scanpy pytest`.
+   - Optional GEARS extras (dcor, wandb, seaborn, matplotlib) are imported only inside functions lasser never calls.
+   - An `ast`-based audit (2026-10-06) found every relative import resolving and no top-level `gears` import.
 
 ## Package layout (`lasser/`)
 
 | File | Role |
 |---|---|
+| `gears/` | **Vendored GEARS** (`GEARS`, `PertData`, `model`, `utils`, `inference`, `data_utils`, `version`) + `VENDORED.md` listing every change. Don't edit except to fix import or compatibility problems (mark with `# LASSER:`) |
 | `__init__.py` | Exports `LasserConfig`, `GSRConfig`, `run_experiment`, `prepare`, `load_pert_data`, `load_run`. Must not import GSR modules |
 | `config.py` | `LasserConfig` (GEARS defaults, Kaggle paths, flags) and nested `GSRConfig` (plan §11 defaults); `config_hash()`, `gsr_cache_key()`, `from_dict` |
 | `utils.py` | `seed_everything` (the only seeding helper), `phase` (time + peak CUDA memory), `capture_stderr` (tees GEARS's stderr `print_sys`), `graph_stats` |
@@ -37,17 +46,17 @@ Only `run.py` imports `graph.py`, and only when `graph_learning=True`. That is w
 ## Key mechanics
 
 - **The order of calls is what parity depends on.**
-  1. `import gears` (it calls `torch.manual_seed(0)` when imported).
+  1. `import lasser.gears` (the vendored GEARS calls `torch.manual_seed(0)` when imported).
   2. `seed_everything(seed)`.
   3. `PertData.load`, then `prepare_split`, then `get_dataloader(32, 128)`.
   4. Graph-learning runs only: build the GSR graph.
   5. `seed_everything(seed)` again.
   6. `GEARS(pert_data, device)`, then `model_initialize(...)`, then `train(epochs, lr, wd)`.
 
-  `tests/test_01_parity.py::reference_gears` repeats this order with plain GEARS.
+  `tests/test_01_parity.py::reference_gears` repeats this order by calling `lasser.gears` directly, with no other lasser code.
 - **Flag off:** lasser passes no graph, so GEARS builds A0 itself. **Flag on:** the graph goes in through `model_initialize(G_coexpress=..., G_coexpress_weight=...)`.
 - **The saved graph is read back from the model** (`gears.model.G_coexpress` and `.G_coexpress_weight`).
-- **A0 is built from control cells plus training *singles* only** (`gears/utils.py:294`). Positives are built from the same cells on half H1; views E and R use all training cells.
+- **A0 is built from control cells plus training *singles* only** (`lasser/gears/utils.py:294`). Positives are built from the same cells on half H1; views E and R use all training cells.
 - **Graph format:** edges run source → target, where a target's sources are its neighbours. Kept A0 edges come first, in GEARS's order and direction; new edges are appended in both directions. Degree means in-degree without self-loops.
 - **Windows fix:** `load_pert_data` resets `pert_data.dataset_name` from `dataset_path`, because GEARS derives it with `split('/')`.
 - **GSR cache:** `cache_dir/gsr/<dataset>_<split>_seed<s>_<tgs>_<hash>/`. The hash covers the GSR config and the GEARS co-expression parameters. A cache hit is checked against the current A0.
@@ -70,8 +79,8 @@ Only `run.py` imports `graph.py`, and only when `graph_learning=True`. That is w
 | File | Covers |
 |---|---|
 | `conftest.py` | Env vars `LASSER_DATA_DIR`, `LASSER_TEST_DIR`, `LASSER_SUBSAMPLE` (4), `LASSER_SMOKE`; session fixtures `pert_data` and `runs` (tiny flag-off and flag-on runs); `make_cfg`, `tiny_gsr` |
-| `test_00_packaging.py` | Tests 2 and 3: `lasser/` copied alone into a temp dir and run in a subprocess, plus a `sys.modules` check |
-| `test_01_parity.py` | Test 1: exact equality on CPU (graph, GO graph, initial state, first 5 losses, best model after 1 epoch) |
+| `test_00_packaging.py` | Tests 2 and 3: `lasser/` copied alone into a temp dir and run in a subprocess; `sys.modules` checks that no GSR module and no top-level `gears` is imported |
+| `test_01_parity.py` | Test 1: lasser flag-off vs the vendored GEARS called directly; exact equality on CPU (graph, GO graph, initial state, first 5 losses, best model after 1 epoch) |
 | `test_02_graphs.py` | Tests 4 and 5: saved graph = used graph; shape contract and `d_min` |
 | `test_03_leakage.py` | Test 6: permuting and rescaling val/test cells leaves A0, views, positives, embeddings and the refined graph identical (CPU) |
 | `test_04_cache_tracking.py` | Tests 7 and 8 plus the `eval.py` hash check |
