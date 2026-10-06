@@ -1,5 +1,5 @@
-GEARS/
-WSDM23-GSR/
+/GEARS/
+/WSDM23-GSR/
 *.pdf
 __pycache__/
 *.pyc
