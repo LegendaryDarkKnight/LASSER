@@ -91,6 +91,10 @@ class GSRConfig:
     cand_topk: int = 100
     chunk_size: int = 512
 
+    # Controls (not part of the method): "random" rewires every new edge to a random
+    # source gene, keeping each gene's in-degree and the weight distribution.
+    edge_control: Optional[str] = None
+
     # Checks (plan §6.1)
     h2_hit_threshold: float = 0.2
     collapse_sample: int = 2000
@@ -111,6 +115,8 @@ class GSRConfig:
             raise ValueError("r_minus must be in [0, 1)")
         if self.m_plus < 0 or self.d_min < 0:
             raise ValueError("m_plus and d_min must be >= 0")
+        if self.edge_control not in (None, "random"):
+            raise ValueError("edge_control must be None or 'random'")
         if not 0 <= self.hard_neg_frac < 1:
             raise ValueError("hard_neg_frac must be in [0, 1)")
 

@@ -2,11 +2,27 @@
 
 Read this at the start of a new session. It records what has been built, what was decided, and what comes next. Details are in `LASSER.md` (usage, config fields, run-folder layout), `gsr_coexpression_plan.md` (method) and `claude_code_prompt_gsr_gears.md` (task spec).
 
-## Status (2026-10-06)
+## Status (2026-10-12)
 
-- The `lasser/` package, `tests/`, `notebooks/run_lasser.ipynb` and `LASSER.md` are written and committed in a local git repo (commits on `master`, no remote yet; GEARS vendored into `lasser/gears/` on 2026-10-06).
-- **Nothing has been executed yet.** The only check was syntax parsing. All tests run on Kaggle; the user sends back the notebook output or `test_output.txt` after each run.
-- **Next step:** the user pushes to GitHub, sets `REPO_URL` in notebook cell 2 and runs cells 1–3 (tests). Then we fix whatever fails, starting with `test_01_parity.py`, the gate for everything else.
+- **All tests pass on Kaggle** (run 04, commit `02a13c9`): 13 passed, plus the full-Norman smoke test with the flag off and on. The `eval.py` hash test is skipped because the user untracked `eval.py`.
+- **First full result (seed 1, 20 epochs, T4)**, from `runs.csv`:
+
+  | | GEARS | LASSER |
+  |---|---|---|
+  | Pearson Δ | 0.534 | 0.574 |
+  | MSE top-20 DE | 0.210 | 0.188 |
+  | Pearson Δ, unseen single | 0.464 | 0.494 |
+  | Pearson Δ, combo seen 2 | 0.563 | 0.633 |
+
+  One split only; this is not evidence yet. Each run takes about 83 min of training plus 3 min of evaluation.
+- **Study built (2026-10-12): `notebooks/lasser_study.ipynb` plus `lasser/study.py`, `lasser/analysis.py` and `lasser/figures.py`.** The user chose core + controls + ablations on GPU T4 x2:
+  - Core (5 splits): GEARS, LASSER.
+  - Controls (5 splits): GEARS-kNN8, LASSER-random.
+  - Ablations (splits 1–3): noS, Eonly, addonly, embinit, m2, m10.
+  - 38 runs in total, about 54 GPU-hours, about 3 Kaggle sessions with 2 parallel workers.
+- New library feature: `GSRConfig.edge_control="random"` (the random-edge control, `refine.randomize_new_edges`).
+- Concurrency safety: `runs.csv` appends are file-locked; GSR cache entries are written to a temporary folder and then renamed; hash columns are read as text.
+- **Next step:** push. The user runs `lasser_study.ipynb` (commit mode), then resumes with `RESUME_FROM` until all 38 jobs are done, and sends the outputs (`lasser_study_results.zip` or the notebook). The new code has only been syntax-checked; cell 4 runs `test_06_study.py` on synthetic data first.
 
 ## Kaggle run log
 
@@ -136,6 +152,9 @@ Only `run.py` imports `graph.py`, and only when `graph_learning=True`. That is w
 
 ## Open items / next steps
 
-1. Get the Kaggle test output, fix failures, and repeat until tests 1–8 pass, then test 9.
-2. Record measured time and memory (from `metrics/timings.json` and `runs.csv`) here and in LASSER.md.
-3. Then follow plan gates G1–G5: check link AUC and the H2 checks on seed 1, run the refinement grid (m⁺ × r⁻), select with 10-epoch runs on validation DE-MSE, confirm on seeds 1–5, then the ablations F3–F6.
+1. Run the study (`notebooks/lasser_study.ipynb`) and fix anything `test_06_study.py` or the workers report.
+2. After it finishes, interpret Tables 1–5 and Figs. 1–6. The claim stands only if LASSER beats **both** controls (GEARS-kNN8 and LASSER-random), not just GEARS.
+3. Still open: the S view gives 88% of genes (isolated in A0) identical embeddings (S link AUC about 0.23). The `LASSER-noS` and `LASSER-Eonly` ablations answer it empirically; if noS is as good or better, drop S from the method.
+4. Possible later additions:
+   - external validation of consensus edges (STRING/TRRUST; needs the data files);
+   - a second dataset (e.g. Replogle K562), if reviewers ask.

@@ -70,7 +70,7 @@ def graph_checks(adata, tc: TrainingCells, a0_edge_index: torch.Tensor, refined_
         p = torch.from_numpy(pairs).to(device)
         return float((C[p[:, 0], p[:, 1]] > cfg.h2_hit_threshold).float().mean())
 
-    added = edits[edits.action.isin(["add", "topup"])][["source", "target"]].to_numpy()
+    added = edits[edits.action.isin(["add", "topup", "random"])][["source", "target"]].to_numpy()
     a0_ids, a0_nbrs = _undirected_sets(a0, n)
     a0_pairs = np.stack([a0_ids // n, a0_ids % n], 1)
     deg_a0 = np.array([len(s) for s in a0_nbrs])

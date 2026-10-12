@@ -12,4 +12,5 @@ networkx
 tqdm
 requests
 # optional: dcor (GEARS GI analysis), wandb (GEARS weight_bias_track), seaborn + matplotlib (GEARS plot_perturbation)
+# study figures: matplotlib (preinstalled on Kaggle; imported only by lasser/figures.py)
 # tests: pytest

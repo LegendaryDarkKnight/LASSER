@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import glob
 import hashlib
@@ -113,6 +114,31 @@ def _version(pkg: str) -> Optional[str]:
         return version(pkg)
     except Exception:
         return None
+
+
+_TEXT_COLUMNS = {"run_id": str, "config_hash": str, "split_hash": str, "gsr_cache_key": str, "run_tag": str}
+
+
+def read_runs_csv(path: str) -> pd.DataFrame:
+    """runs.csv with id/hash columns kept as text (a hex hash like '123e4567...' would parse as a float)."""
+    return pd.read_csv(path, dtype=_TEXT_COLUMNS)
+
+
+@contextlib.contextmanager
+def file_lock(path: str):
+    """Exclusive lock on ``path`` (POSIX flock; a no-op where fcntl is unavailable)."""
+    try:
+        import fcntl
+    except ImportError:  # Windows: single process only
+        yield
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def _vendored_gears_version() -> str:
@@ -238,9 +264,12 @@ class RunTracker:
     def append_runs_csv(self, row: Dict[str, Any]) -> str:
         path = os.path.join(self.cfg.out_dir, "runs.csv")
         new = pd.DataFrame([to_jsonable(row)])
-        if os.path.exists(path):
-            new = pd.concat([pd.read_csv(path), new], ignore_index=True, sort=False)
-        new.to_csv(path, index=False)
+        with file_lock(path + ".lock"):  # parallel workers append to the same table
+            if os.path.exists(path):
+                new = pd.concat([read_runs_csv(path), new], ignore_index=True, sort=False)
+            tmp = f"{path}.tmp-{os.getpid()}"
+            new.to_csv(tmp, index=False)
+            os.replace(tmp, path)
         logger.info("appended run %s to %s", self.run_id, path)
         return path
 

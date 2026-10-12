@@ -93,6 +93,7 @@ Defaults follow plan §11. Where the plan gives a grid, the default is one value
 | Schedule | `lr` 1e-3, `weight_decay` 0, `max_steps` 300, `batch_edges` 2048, `eval_every` 10, `patience` 50 |
 | Refinement | `beta` {E 0.4, R 0.3, S 0.3}, `r_minus` 0.1, `m_plus` 5, `d_min` 5, `gamma` 0.5, `score_floor` 0, `cand_topk` 100, `chunk_size` 512 |
 | Checks | `h2_hit_threshold` 0.2, `collapse_sample` 2000 |
+| Control (not the method) | `edge_control` None; `"random"` rewires every new edge to a random source gene, keeping each gene's in-degree and the weight distribution (the `LASSER-random` arm) |
 
 ### The GSR pipeline (`graph_learning=True`)
 
@@ -145,6 +146,39 @@ The device (`cuda:0 (<GPU name>, <memory>)` or `cpu`) is logged before anything 
 
 `epoch_log.csv` is parsed from GEARS's printout, because its training loop reports nothing else. So the train loss column is the mean of the losses GEARS prints every 50 steps.
 
+## The study (multi-split experiments and analysis)
+
+`notebooks/lasser_study.ipynb` runs the paper's experiment set on Kaggle (GPU T4 x2) and analyses it. The modules:
+
+| Module | Role |
+|---|---|
+| `lasser/study.py` | `ARMS` (arm name → config overrides), `DEFAULT_PLAN`, `make_jobs`, `prepare_data` (warms data, splits and GEARS graphs in a subprocess), `launch` (one worker process per GPU), `study_status`. Also runs as `python -m lasser.study prep|worker` |
+| `lasser/analysis.py` | Reads saved runs: `metrics_long`, `summary_table`, `paired_tests` (across splits, Holm), `per_perturbation` / `paired_perturbation` (split-resampling bootstrap), `paper_reference_baselines` (no-perturbation, additive), `gene_group_metrics` (genes isolated vs connected in A0), `training_curves`, `graph_table`, `edge_stability`, `consensus_edges`, `overlap_with_knn8`, `export_tables` (CSV + LaTeX) |
+| `lasser/figures.py` | Paper figures (PDF + PNG), one fixed validated colour per arm |
+
+Arms:
+
+| Arm | Config | Splits |
+|---|---|---|
+| `GEARS` | `graph_learning=False` | 1–5 |
+| `LASSER` | `graph_learning=True` (defaults) | 1–5 |
+| `GEARS-kNN8` | GEARS with `coexpress_threshold=0.0`, `num_similar_genes_co_express_graph=8` (Pearson graph about as dense as LASSER's) | 1–5 |
+| `LASSER-random` | `gsr.edge_control="random"`: every new edge gets a random source gene (same in-degrees, shuffled weights) | 1–5 |
+| `LASSER-noS` / `-Eonly` | `gsr.views=("E","R")` / `("E",)` | 1–3 |
+| `LASSER-addonly` | `gsr.r_minus=0` | 1–3 |
+| `LASSER-embinit` | `gsr_init_gene_emb=True` | 1–3 |
+| `LASSER-m2` / `-m10` | `gsr.m_plus=2` / `10` | 1–3 |
+
+**How jobs run:**
+
+- **Done check.** A job is done when `runs.csv` has a row with its config hash, so a new session skips finished work. Copy the previous output into `study/` (`RESUME_FROM`).
+- **Claims.** Workers claim jobs with files in `runs/claims/<session>/`, so two GPUs never run the same job.
+- **Deadline.** Workers stop before the session deadline.
+- **Failures** are written to `runs/failures.csv` and retried in the next session.
+- **Sharing.** Each worker gets `cpu_count / n_gpus` CPU threads. `runs.csv` appends are file-locked, and GSR cache entries are written to a temporary folder and then renamed.
+
+Data lives in `/tmp/lasser_data`, so it isn't saved as output (it's several GB) and is re-downloaded each session.
+
 ## Loading a past run
 
 ```python
@@ -175,6 +209,7 @@ It then calls `evaluate_streaming` and `paper_summary` on GEARS's `best_model`.
 | `test_03_leakage.py` | 6: validation/test cells permuted and rescaled: identical A0, views, positives, embeddings and refined graph |
 | `test_04_cache_tracking.py` | 7: cache hit returns identical tensors. 8: every file exists, `runs.csv` has the rows, `load_run` reads them. Also checks the `eval.py` copy |
 | `test_05_parsing.py` | GEARS printout parsing on real lines (no data needed) |
+| `test_06_study.py` | Synthetic data, no dataset: random-edge control keeps in-degrees and weights; job table; analysis functions; figures render |
 | `test_09_smoke.py` | 9: full Norman, 1 epoch, flag off and on, peak memory < 15 GB, GSR < 4 GB (`LASSER_SMOKE=1`) |
 
 Environment variables: `LASSER_DATA_DIR`, `LASSER_TEST_DIR`, `LASSER_SUBSAMPLE` (default 4 cells per condition), `LASSER_SMOKE`.

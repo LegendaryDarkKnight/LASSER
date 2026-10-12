@@ -68,7 +68,7 @@ def run_gsr_pipeline(adata, set2conditions, a0: CoexpressGraph, gene_list, cfg: 
     from .checks import graph_checks
     from .data import build_training_cells
     from .pretrain import build_positives, pretrain
-    from .refine import refine_graph
+    from .refine import randomize_new_edges, refine_graph
     from .views import build_views, response_profiles, undirected_simple
 
     from .utils import describe_device
@@ -91,14 +91,17 @@ def run_gsr_pipeline(adata, set2conditions, a0: CoexpressGraph, gene_list, cfg: 
     with phase("gsr/refine", timings):
         refined = refine_graph(res.embeddings, a0.edge_index, a0.edge_weight, g,
                                cfg.num_similar_genes_co_express_graph, device)
+        if g.edge_control == "random":
+            refined = randomize_new_edges(refined, a0.edge_index, n, cfg.seed)
     with phase("gsr/checks", timings):
         checks = graph_checks(adata, tc, a0.edge_index, refined.edge_index, refined.edits,
                               res.embeddings, g, cfg.seed, device)
     checks["pretrain"] = {"best_step": res.best_step, "best_link_auc": res.best_auc,
                           "baseline_link_auc": res.baseline_auc, **res.stats}
     checks["refine"] = refined.stats
+    source = "gsr_random_control" if g.edge_control == "random" else "gsr_refined"
     return CoexpressGraph(
-        refined.edge_index.long(), refined.edge_weight.float(), "gsr_refined", a0=a0,
+        refined.edge_index.long(), refined.edge_weight.float(), source, a0=a0,
         edits=refined.edits, checks=checks, embeddings=res.embeddings, encoder_state=res.state_dict,
         info={"history": res.history,
               "views_missing": {v: int(f.missing.sum()) for v, f in views.items()},
@@ -123,18 +126,30 @@ class GSRCoexpressProvider:
         return all(os.path.exists(os.path.join(self.cache_path, f)) for f in self.FILES)
 
     def _save(self, g: CoexpressGraph) -> None:
-        os.makedirs(self.cache_path, exist_ok=True)
+        """Write into a temporary folder, then move it into place in one step, so a
+        parallel worker never sees a half-written cache entry."""
+        import shutil
+
+        from .tracking import to_jsonable
+
+        tmp = f"{self.cache_path}.tmp-{os.getpid()}"
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(tmp)
         torch.save({"edge_index": g.edge_index, "edge_weight": g.edge_weight,
                     "a0_edge_index": g.a0.edge_index, "a0_edge_weight": g.a0.edge_weight},
-                   os.path.join(self.cache_path, "graph.pt"))
+                   os.path.join(tmp, "graph.pt"))
         torch.save({"embeddings": g.embeddings, "encoder_state": g.encoder_state, "info": g.info},
-                   os.path.join(self.cache_path, "extras.pt"))
-        g.edits.to_csv(os.path.join(self.cache_path, "edits.csv"), index=False)
-        from .tracking import to_jsonable
-        with open(os.path.join(self.cache_path, "checks.json"), "w") as f:
+                   os.path.join(tmp, "extras.pt"))
+        g.edits.to_csv(os.path.join(tmp, "edits.csv"), index=False)
+        with open(os.path.join(tmp, "checks.json"), "w") as f:
             json.dump(to_jsonable(g.checks), f, indent=2)
-        with open(os.path.join(self.cache_path, "meta.json"), "w") as f:
+        with open(os.path.join(tmp, "meta.json"), "w") as f:
             json.dump({"key": self.key, "config": to_jsonable(self.cfg.to_dict())}, f, indent=2)
+        os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
+        try:
+            os.rename(tmp, self.cache_path)
+        except OSError:  # another worker finished the same entry first; keep theirs
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def _load(self) -> CoexpressGraph:
         import pandas as pd
@@ -144,7 +159,8 @@ class GSRCoexpressProvider:
         with open(os.path.join(self.cache_path, "checks.json")) as f:
             checks = json.load(f)
         a0 = CoexpressGraph(d["a0_edge_index"], d["a0_edge_weight"], "gears_static")
-        return CoexpressGraph(d["edge_index"], d["edge_weight"], "gsr_refined", a0=a0,
+        source = "gsr_random_control" if self.cfg.gsr.edge_control == "random" else "gsr_refined"
+        return CoexpressGraph(d["edge_index"], d["edge_weight"], source, a0=a0,
                               edits=pd.read_csv(os.path.join(self.cache_path, "edits.csv")),
                               checks=checks, embeddings=x["embeddings"], encoder_state=x["encoder_state"],
                               info=x["info"])

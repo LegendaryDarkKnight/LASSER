@@ -204,3 +204,46 @@ def refine_graph(embs: Dict[str, torch.Tensor], a0_edge_index: torch.Tensor, a0_
     }
     logger.info("refinement: %s", stats)
     return RefinedGraph(ei.cpu(), ew.cpu().float(), edits, stats)
+
+
+@torch.no_grad()
+def randomize_new_edges(rg: RefinedGraph, a0_edge_index: torch.Tensor, n: int, seed: int,
+                        max_tries: int = 50) -> RefinedGraph:
+    """Control graph: the same kept A0 edges, but every new edge gets a random source.
+
+    Each new edge (s -> t) keeps its target t, so every gene keeps exactly the in-degree
+    (what SGConv aggregates) the refined graph gave it; the new-edge weights are shuffled,
+    so their distribution is unchanged. Random sources avoid self-loops, A0 pairs and
+    duplicates. What's destroyed is *which* genes are connected - the thing GSR learned.
+    """
+    n_kept = rg.stats["a0_edges"] - rg.stats["removed"]
+    kept_ei, new_ei = rg.edge_index[:, :n_kept], rg.edge_index[:, n_kept:]
+    kept_w, new_w = rg.edge_weight[:n_kept], rg.edge_weight[n_kept:]
+    g = torch.Generator().manual_seed(seed)
+    dst = new_ei[1].clone()
+    src = torch.randint(0, n, (len(dst),), generator=g)
+    a0 = a0_edge_index.cpu()
+    forbidden = torch.unique(pair_ids(a0[0][a0[0] != a0[1]], a0[1][a0[0] != a0[1]], n))
+    kept_ids = kept_ei[0] * n + kept_ei[1]
+    for _ in range(max_tries):
+        ids = src * n + dst
+        dup = torch.ones(len(ids), dtype=torch.bool)
+        dup[torch.from_numpy(np.unique(ids.numpy(), return_index=True)[1])] = False
+        bad = (src == dst) | in_sorted(pair_ids(src, dst, n), forbidden) | dup \
+            | in_sorted(ids, torch.sort(kept_ids).values)
+        if not bool(bad.any()):
+            break
+        src[bad] = torch.randint(0, n, (int(bad.sum()),), generator=g)
+    if bool(bad.any()):
+        logger.warning("random control: dropping %d edges without a valid random source", int(bad.sum()))
+        src, dst, new_w = src[~bad], dst[~bad], new_w[~bad]
+    new_w = new_w[torch.randperm(len(new_w), generator=g)]
+
+    ei = torch.cat([kept_ei, torch.stack([src, dst])], 1)
+    ew = torch.cat([kept_w, new_w]).float()
+    edits = pd.concat([rg.edits[rg.edits.action == "remove"],
+                       pd.DataFrame({"source": src.numpy(), "target": dst.numpy(),
+                                     "action": "random", "score": np.nan})], ignore_index=True)
+    stats = dict(rg.stats, control="random", random_edges=int(len(src)), refined_edges=int(ei.shape[1]))
+    logger.info("random-edge control: %d new edges rewired (targets and weight distribution kept)", len(src))
+    return RefinedGraph(ei, ew, edits, stats)
