@@ -2,7 +2,7 @@
 
 Read this at the start of a new session. It records what has been built, what was decided, and what comes next. Details are in `LASSER.md` (usage, config fields, run-folder layout), `gsr_coexpression_plan.md` (method) and `claude_code_prompt_gsr_gears.md` (task spec).
 
-## Status (2026-10-13: see study session 1 in the run log)
+## Status (2026-10-13: option-1 study ready; see the run log)
 
 - **All tests pass on Kaggle** (run 04, commit `02a13c9`): 13 passed, plus the full-Norman smoke test with the flag off and on. The `eval.py` hash test is skipped because the user untracked `eval.py`.
 - **First full result (seed 1, 20 epochs, T4)**, from `runs.csv`:
@@ -88,7 +88,11 @@ What run 02 measured (smoke test: full Norman, T4):
   - H2 hit rate 0.033 vs 0.001 for degree-matched random (A0: 0.605).
   - Between splits, new-edge sets have Jaccard 0.027; 333 pairs recur in at least 3 of 3 splits.
   - Top consensus edges form a coherent cell-cycle module (CDCA8, CENPA, AURKA, BIRC5, CKS2), which is useful for the "reasoning" part.
-- **Open decision for the user:** continue the study as is (likely a well-powered null result), or first add an opt-in batching fix and/or training-seed replicates. See the conversation of 2026-10-13.
+- **Decision (2026-10-13): option 1.** Add an opt-in batching fix plus training-seed replicates, and run a new study that fits a 10-hour session.
+  - Implemented: `LasserConfig.fix_coexpress_batching` (`lasser/batching.py`, `BatchedSGConv`) and `LasserConfig.train_seed` (`cfg.rng_seed`). Both are left out of `config_hash` at their defaults, so old runs keep their hashes.
+  - `study.FIX_PLAN` with arms GEARS-fix, LASSER-fix, GEARS-kNN8-fix and LASSER-random-fix, 10 epochs; the analysis handles replicates (`rep`, `unit="split"|"run"`).
+  - `notebooks/lasser_fix_study.ipynb`; `tests/test_07_fix.py`.
+  - **Next:** the user runs `lasser_fix_study.ipynb` (10 h) and sends back `lasser_fix_study_results.zip` plus the notebook.
 
 ## Decisions made with the user
 

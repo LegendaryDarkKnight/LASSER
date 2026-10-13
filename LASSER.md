@@ -76,6 +76,8 @@ Seeding: `seed_everything(seed)` runs at the start and again right before `GEARS
 | `run_tag` | `None` | Suffix for the run folder name |
 | `subsample_cells_per_condition` | `None` | **Tests only**: keep the first n cells of each condition in the dataloaders |
 | `uncertainty` | `False` | Must stay `False`: `eval.py` expects point predictions |
+| `fix_coexpress_batching` | `False` | Opt-in fix: every cell in a batch gets co-expression messages (upstream GEARS: only the first). See below |
+| `train_seed` | `None` | RNG seed for model initialisation and batch order; `None` = `seed`. For training-seed replicates on one split; the learned graph doesn't depend on it |
 
 ### `GSRConfig` (nested as `cfg.gsr`)
 
@@ -146,6 +148,26 @@ The device (`cuda:0 (<GPU name>, <memory>)` or `cpu`) is logged before anything 
 
 `epoch_log.csv` is parsed from GEARS's printout, because its training loop reports nothing else. So the train loss column is the mean of the losses GEARS prints every 50 steps.
 
+## The batching fix and the option-1 study
+
+**The fix (`fix_coexpress_batching=True`).** `GEARS_Model.forward` stacks the gene embeddings of all cells in a batch into one `batch_size × num_genes` node set, but runs the co-expression SGConv with the single-cell `G_coexpress`. So only the first cell gets messages from its co-expressed genes.
+- `lasser/batching.py` swaps each co-expression SGConv's class for `BatchedSGConv`, which repeats the graph once per cell (node ids offset by `num_genes`).
+- Parameters, `state_dict` keys and GEARS's code are unchanged; with one cell per batch the output is identical.
+- Off by default; it's recorded in `runs.csv` (`fix_coexpress_batching`, `train_seed`).
+- `GEARS.load_pretrained` doesn't know about the flag: re-enable it after loading a fixed model.
+
+**`notebooks/lasser_fix_study.ipynb`** (`lasser.study.FIX_PLAN`): 10 epochs for every arm, about 50 min per run on one GPU. Jobs run in priority tiers, interleaved by split:
+1. `GEARS-fix` vs `LASSER-fix`, splits 1–3
+2. `LASSER-random-fix`, splits 1–3
+3. `GEARS-kNN8-fix`, splits 1–3
+4. `GEARS` (no fix), splits 1–3
+5. training-seed replicates `_ts101` of tier 1
+6. splits 4–5
+
+A 10-hour session finishes tiers 1–2 and part of tier 3; later sessions resume.
+
+**How the analysis handles replicates.** Runs are keyed by (arm, split, `rep` = training seed; 0 = default). Tables and paired tests average replicates within a split (`unit="split"`); `unit="run"` pairs every (split, training seed). Per-perturbation tests pair on (split, rep, perturbation).
+
 ## The study (multi-split experiments and analysis)
 
 `notebooks/lasser_study.ipynb` runs the paper's experiment set on Kaggle (GPU T4 x2) and analyses it. The modules:
@@ -210,6 +232,7 @@ It then calls `evaluate_streaming` and `paper_summary` on GEARS's `best_model`.
 | `test_04_cache_tracking.py` | 7: cache hit returns identical tensors. 8: every file exists, `runs.csv` has the rows, `load_run` reads them. Also checks the `eval.py` copy |
 | `test_05_parsing.py` | GEARS printout parsing on real lines (no data needed) |
 | `test_06_study.py` | Synthetic data, no dataset: random-edge control keeps in-degrees and weights; job table; analysis functions; figures render |
+| `test_07_fix.py` | Synthetic: batched SGConv equals per-cell SGConv (and upstream differs); new config fields keep old hashes; fix plan; replicate parsing |
 | `test_09_smoke.py` | 9: full Norman, 1 epoch, flag off and on, peak memory < 15 GB, GSR < 4 GB (`LASSER_SMOKE=1`) |
 
 Environment variables: `LASSER_DATA_DIR`, `LASSER_TEST_DIR`, `LASSER_SUBSAMPLE` (default 4 cells per condition), `LASSER_SMOKE`.

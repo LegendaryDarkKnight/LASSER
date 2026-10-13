@@ -54,6 +54,12 @@ ARMS: Dict[str, Dict[str, Any]] = {
     "LASSER-embinit": dict(graph_learning=True, gsr_init_gene_emb=True),
     "LASSER-m2": dict(graph_learning=True, gsr=dict(m_plus=2)),
     "LASSER-m10": dict(graph_learning=True, gsr=dict(m_plus=10)),
+    # with the opt-in co-expression batching fix (every cell gets graph messages)
+    "GEARS-fix": dict(graph_learning=False, fix_coexpress_batching=True),
+    "LASSER-fix": dict(graph_learning=True, fix_coexpress_batching=True),
+    "GEARS-kNN8-fix": dict(graph_learning=False, fix_coexpress_batching=True, coexpress_threshold=0.0,
+                           num_similar_genes_co_express_graph=8),
+    "LASSER-random-fix": dict(graph_learning=True, fix_coexpress_batching=True, gsr=dict(edge_control="random")),
 }
 
 ARM_DESCRIPTIONS = {
@@ -67,7 +73,34 @@ ARM_DESCRIPTIONS = {
     "LASSER-embinit": "LASSER + gene embedding initialised from the pretrained E view",
     "LASSER-m2": "LASSER with m+ = 2 new edges per gene",
     "LASSER-m10": "LASSER with m+ = 10 new edges per gene",
+    "GEARS-fix": "GEARS with the co-expression batching fix (every cell gets graph messages)",
+    "LASSER-fix": "LASSER graph + batching fix",
+    "GEARS-kNN8-fix": "density-matched Pearson kNN-8 graph + batching fix",
+    "LASSER-random-fix": "LASSER graph with new edges rewired at random + batching fix",
 }
+
+# Option 1 study (10-hour Kaggle sessions, 10 epochs per arm): tiers in priority order,
+# splits interleaved so whatever finishes is a complete paired set. Entries are
+# (arm, splits, train_seeds); train_seeds None = the split seed.
+FIX_PLAN: List[Tuple[str, Sequence[int], Optional[Sequence[int]]]] = [
+    # 1. the claim: learned vs Pearson graph, both with the fix
+    ("GEARS-fix", [1], None), ("LASSER-fix", [1], None),
+    ("GEARS-fix", [2], None), ("LASSER-fix", [2], None),
+    ("GEARS-fix", [3], None), ("LASSER-fix", [3], None),
+    # 2. key control: same degrees and weights, random partners
+    ("LASSER-random-fix", [1, 2, 3], None),
+    # 3. density-matched Pearson graph
+    ("GEARS-kNN8-fix", [1, 2, 3], None),
+    # 4. what the fix itself changes (unfixed GEARS at the same 10 epochs)
+    ("GEARS", [1, 2, 3], None),
+    # 5. training-seed replicates of the core pair
+    ("GEARS-fix", [1], [101]), ("LASSER-fix", [1], [101]),
+    ("GEARS-fix", [2], [101]), ("LASSER-fix", [2], [101]),
+    ("GEARS-fix", [3], [101]), ("LASSER-fix", [3], [101]),
+    # 6. more splits
+    ("GEARS-fix", [4, 5], None), ("LASSER-fix", [4, 5], None),
+    ("LASSER-random-fix", [4, 5], None), ("GEARS-kNN8-fix", [4, 5], None),
+]
 
 # The plan the user chose: core + controls on 5 splits, ablations on 3 (in priority order).
 DEFAULT_PLAN: List[Tuple[str, Sequence[int]]] = [
@@ -84,27 +117,39 @@ DEFAULT_PLAN: List[Tuple[str, Sequence[int]]] = [
 ]
 
 
-def arm_config(arm: str, seed: int, base: Dict[str, Any]) -> LasserConfig:
+def run_tag(arm: str, seed: int, train_seed: Optional[int] = None) -> str:
+    """``<arm>_seed<split>`` or ``<arm>_seed<split>_ts<train_seed>`` (parsed by lasser.analysis)."""
+    return f"{arm}_seed{seed}" + (f"_ts{train_seed}" if train_seed is not None else "")
+
+
+def arm_config(arm: str, seed: int, base: Dict[str, Any], train_seed: Optional[int] = None) -> LasserConfig:
     over = copy.deepcopy(ARMS[arm])
     gsr_over = over.pop("gsr", {})
     d = LasserConfig(**base).to_dict()
     d.update(over)
     d["gsr"].update(gsr_over)
     d["seed"] = seed
-    d["run_tag"] = f"{arm}_seed{seed}"
+    d["train_seed"] = train_seed
+    d["run_tag"] = run_tag(arm, seed, train_seed)
     cfg = LasserConfig.from_dict(d)
     cfg.validate()
     return cfg
 
 
-def make_jobs(plan: Iterable[Tuple[str, Sequence[int]]], base: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Jobs in priority order: all splits of the first arm first, then the next arm, ..."""
-    jobs = []
-    for arm, seeds in plan:
+def make_jobs(plan: Iterable[tuple], base: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Jobs in plan order. Entries: (arm, splits) or (arm, splits, train_seeds)."""
+    jobs, seen = [], set()
+    for entry in plan:
+        arm, seeds = entry[0], entry[1]
+        train_seeds = entry[2] if len(entry) > 2 and entry[2] is not None else [None]
         for seed in seeds:
-            cfg = arm_config(arm, seed, base)
-            jobs.append({"job_id": cfg.run_tag, "arm": arm, "seed": seed,
-                         "config_hash": cfg.config_hash(), "config": cfg.to_dict()})
+            for ts in train_seeds:
+                cfg = arm_config(arm, seed, base, ts)
+                if cfg.run_tag in seen:
+                    continue
+                seen.add(cfg.run_tag)
+                jobs.append({"job_id": cfg.run_tag, "arm": arm, "seed": seed, "train_seed": ts,
+                             "config_hash": cfg.config_hash(), "config": cfg.to_dict()})
     return jobs
 
 
@@ -139,11 +184,17 @@ def study_status(jobs: List[Dict[str, Any]]) -> pd.DataFrame:
     for j in jobs:
         hit = t[t["config_hash"].astype(str) == j["config_hash"]] if len(t) else t
         last = hit.iloc[-1] if len(hit) else None
-        rows.append({"job_id": j["job_id"], "arm": j["arm"], "seed": j["seed"], "done": last is not None,
+        rows.append({"job_id": j["job_id"], "arm": j["arm"], "seed": j["seed"],
+                     "train_seed": j.get("train_seed"), "done": last is not None,
                      "test_pearson_delta": None if last is None else last.get("test_pearson_delta"),
                      "train_minutes": None if last is None else round(float(last.get("train_seconds", 0)) / 60, 1),
                      "run_dir": None if last is None else last.get("run_dir")})
     return pd.DataFrame(rows)
+
+
+def default_minutes(epochs: int) -> float:
+    """Full-Norman run on a T4: ~4.2 min per epoch (training + GEARS's per-epoch evaluation) + ~8 min overhead."""
+    return 8.0 + 4.2 * epochs
 
 
 def expected_minutes(out_dir: str, default: float = 95.0) -> float:
@@ -204,7 +255,7 @@ def run_worker(jobs: List[Dict[str, Any]], session: str, deadline: float, worker
     for job in jobs:
         if job["config_hash"] in done_hashes(out_dir):
             continue
-        need = expected_minutes(out_dir) * 60
+        need = expected_minutes(out_dir, default_minutes(job["config"]["epochs"])) * 60
         if time.time() + need > deadline:
             logger.info("worker %d: next job needs ~%.0f min, past the deadline; stopping", worker, need / 60)
             break
@@ -356,7 +407,7 @@ def launch(jobs: List[Dict[str, Any]], gpus: Optional[Sequence[int]] = None, bud
     os.makedirs(log_dir, exist_ok=True)
 
     todo = [j for j in jobs if j["config_hash"] not in done_hashes(out_dir)]
-    est = expected_minutes(out_dir)
+    est = expected_minutes(out_dir, default_minutes(jobs[0]["config"]["epochs"]))
     print(f"session {session}: {len(jobs) - len(todo)}/{len(jobs)} jobs already done, {len(todo)} to run "
           f"on {len(gpus)} GPU(s); ~{est:.0f} min each -> ~{len(todo) * est / max(len(gpus), 1) / 60:.1f} h "
           f"(budget {budget_hours:.1f} h)")

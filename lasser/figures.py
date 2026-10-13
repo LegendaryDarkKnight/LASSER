@@ -18,6 +18,16 @@ from .analysis import GENE_GROUP_DIRECTION, HEADLINE, SUBGROUPS, better_sign
 # Validated categorical slots 1-4 (light surface); colour follows the arm, never its rank.
 ARM_COLORS: Dict[str, str] = {"GEARS": "#2a78d6", "LASSER": "#eb6834",
                               "GEARS-kNN8": "#1baf7a", "LASSER-random": "#eda100"}
+# Option-1 study (batching fix): unfixed GEARS takes slot 5 (magenta) so the four fixed arms keep
+# slots 1-4. Display order GEARS, GEARS-fix, LASSER-fix, GEARS-kNN8-fix, LASSER-random-fix validated.
+FIX_ARM_COLORS: Dict[str, str] = {"GEARS": "#e87ba4", "GEARS-fix": "#2a78d6", "LASSER-fix": "#eb6834",
+                                  "GEARS-kNN8-fix": "#1baf7a", "LASSER-random-fix": "#eda100"}
+
+
+def use_fix_colors() -> None:
+    """Switch the arm colours to the option-1 (batching-fix) study."""
+    ARM_COLORS.clear()
+    ARM_COLORS.update(FIX_ARM_COLORS)
 REF_COLOR = "#898781"        # reference baselines (No-perturb, Additive): muted ink, not a series
 INK, INK2, GRID, AXIS = "#0b0b0b", "#52514e", "#e1e0d9", "#c3c2b7"
 METRIC_LABELS = {
@@ -191,7 +201,8 @@ def fig_gene_groups(gg_paired: pd.DataFrame, out_dir: str, arm: str = "LASSER") 
         ax.set_xticks(range(len(groups)))
         ax.set_xticklabels(["isolated\nin A0", "connected\nin A0"])
         ax.set_title(METRIC_LABELS.get(m, m), loc="left")
-    np.atleast_1d(axes)[0].set_ylabel(f"{arm} − GEARS (> 0 = better)")
+    ref = d.ref.iloc[0] if len(d) else "GEARS"
+    np.atleast_1d(axes)[0].set_ylabel(f"{arm} − {ref} (> 0 = better)")
     fig.suptitle("Where the gain comes from: output genes by A0 connectivity (mean ± sd over splits)",
                  x=0.01, ha="left", fontsize=8.5)
     fig.tight_layout()
@@ -225,7 +236,9 @@ def fig_training(curves: pd.DataFrame, arms: Sequence[str], out_dir: str, col: s
     return paths
 
 
-def fig_graphs(graphs: pd.DataFrame, runs: pd.DataFrame, out_dir: str, seed: Optional[int] = None) -> List[str]:
+def fig_graphs(graphs: pd.DataFrame, runs: pd.DataFrame, out_dir: str, seed: Optional[int] = None,
+               a0_arm: str = "GEARS", knn_arm: str = "GEARS-kNN8", lasser_arm: str = "LASSER",
+               random_arm: str = "LASSER-random") -> List[str]:
     """Graph structure: in-degree distribution (A0 vs LASSER) and H2 hit rates."""
     import pickle
 
@@ -233,8 +246,8 @@ def fig_graphs(graphs: pd.DataFrame, runs: pd.DataFrame, out_dir: str, seed: Opt
 
     _style()
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.0, 2.6))
-    seed = seed if seed is not None else int(runs[runs.arm == "LASSER"].seed.min())
-    for arm, label in (("GEARS", "A0 (GEARS)"), ("GEARS-kNN8", "Pearson kNN-8"), ("LASSER", "LASSER")):
+    seed = seed if seed is not None else int(runs[runs.arm == lasser_arm].seed.min())
+    for arm, label in ((a0_arm, "A0 (GEARS)"), (knn_arm, "Pearson kNN-8"), (lasser_arm, "LASSER")):
         r = runs[(runs.arm == arm) & (runs.seed == seed)]
         if r.empty:
             continue
@@ -249,9 +262,9 @@ def fig_graphs(graphs: pd.DataFrame, runs: pd.DataFrame, out_dir: str, seed: Opt
     ax1.set_ylabel("genes")
     ax1.set_title(f"Degree distribution (split {seed})", loc="left")
     ax1.legend(fontsize=7)
-    cols = [("h2_hit_a0", "A0 edges", REF_COLOR), ("h2_hit_added", "LASSER new", _color("LASSER")),
-            ("h2_hit_random", "degree-matched random", _color("LASSER-random"))]
-    gl = graphs[graphs.arm == "LASSER"]
+    cols = [("h2_hit_a0", "A0 edges", REF_COLOR), ("h2_hit_added", "LASSER new", _color(lasser_arm)),
+            ("h2_hit_random", "degree-matched random", _color(random_arm))]
+    gl = graphs[graphs.arm == lasser_arm].drop_duplicates("seed")
     for i, (c, lab, color) in enumerate(cols):
         v = gl[c].dropna().to_numpy() if c in gl else np.array([])
         if len(v) == 0:

@@ -111,7 +111,7 @@ def prepare(cfg: LasserConfig, pert_data=None, tracker: Optional[RunTracker] = N
     timings: Dict[str, Any] = {}
     lines: List[str] = []
     gears_log = tracker.gears_log if tracker else None
-    seed_everything(cfg.seed, cfg.deterministic)
+    seed_everything(cfg.rng_seed, cfg.deterministic)
     device = resolve_device(cfg.device)
     logger.info("device: %s (GEARS training%s)", describe_device(device),
                 " and GSR graph learning" if cfg.graph_learning else "")
@@ -137,7 +137,7 @@ def prepare(cfg: LasserConfig, pert_data=None, tracker: Optional[RunTracker] = N
             graph = provider.build(pert_data, device, timings)
             timings["gsr_graph_from_cache"] = provider.from_cache
 
-    seed_everything(cfg.seed, cfg.deterministic)
+    seed_everything(cfg.rng_seed, cfg.deterministic)
     from .gears import GEARS
 
     with phase("gears_init", timings), capture_stderr(lines, gears_log):
@@ -146,6 +146,13 @@ def prepare(cfg: LasserConfig, pert_data=None, tracker: Optional[RunTracker] = N
         if graph is not None:
             kwargs.update(G_coexpress=graph.edge_index, G_coexpress_weight=graph.edge_weight)
         gears_obj.model_initialize(**kwargs)
+    if cfg.fix_coexpress_batching:
+        from .batching import enable_batched_coexpress
+
+        for m in (gears_obj.model, gears_obj.best_model):
+            n = enable_batched_coexpress(m, gears_obj.num_genes)
+        logger.info("co-expression batching fix ON: %d SGConv layer(s) now give every cell in a batch "
+                    "its co-expression messages (upstream GEARS: only the first cell)", n)
     ctx = RunContext(cfg, pert_data, gears_obj, device, graph, timings, lines)
     if cfg.gsr_init_gene_emb:
         timings["gene_emb_init"] = init_gene_embedding(gears_obj, graph.embeddings["E"])
@@ -225,7 +232,8 @@ def _train_evaluate_save(ctx: RunContext, tracker: RunTracker) -> Dict[str, Any]
 
     row: Dict[str, Any] = {
         "run_id": tracker.run_id, "timestamp": tracker.started, "dataset": cfg.dataset, "split": cfg.split,
-        "seed": cfg.seed, "graph_learning": cfg.graph_learning, "gsr_init_gene_emb": cfg.gsr_init_gene_emb,
+        "seed": cfg.seed, "train_seed": cfg.rng_seed, "graph_learning": cfg.graph_learning,
+        "fix_coexpress_batching": cfg.fix_coexpress_batching, "gsr_init_gene_emb": cfg.gsr_init_gene_emb,
         "epochs": cfg.epochs, "subsample_cells_per_condition": cfg.subsample_cells_per_condition,
         "run_tag": cfg.run_tag, "device": describe_device(ctx.device), "config_hash": tracker.config_hash, "split_hash": tracker.split_hash,
         "graph_source": source, **{f"graph_{k}": v for k, v in rec["stats"].items()},

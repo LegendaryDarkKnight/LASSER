@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional, Tuple
 GSR_CACHE_VERSION = 2  # 2: canonical CSR input (run 02)
 
 # Fields that say *where* or *how loudly* a run happens, not *what* it computes.
+_LATER_DEFAULTS = {"fix_coexpress_batching": False, "train_seed": None}
 _NON_SEMANTIC = {"data_dir", "out_dir", "cache_dir", "log_level", "repo_dir", "device", "run_tag"}
 
 
@@ -152,6 +153,13 @@ class LasserConfig:
     # Flags
     graph_learning: bool = False
     gsr_init_gene_emb: bool = False
+    # Opt-in model fix (default off = upstream GEARS): GEARS applies the co-expression
+    # SGConv to batch-stacked gene embeddings but with the single-cell edge_index, so only
+    # the first cell of each batch gets graph messages. True offsets the edges per cell.
+    fix_coexpress_batching: bool = False
+    # RNG seed for model init / batch order; None = ``seed`` (the split seed). Lets several
+    # training runs share one split.
+    train_seed: Optional[int] = None
 
     # Runtime
     device: str = "cuda"
@@ -206,7 +214,15 @@ class LasserConfig:
         d = {k: v for k, v in self.to_dict().items() if k not in _NON_SEMANTIC}
         if not self.graph_learning:
             d.pop("gsr")  # GSR settings don't affect a baseline run
+        # Fields added later are left out at their defaults, so earlier runs keep their hash.
+        for k, default in _LATER_DEFAULTS.items():
+            if d.get(k) == default:
+                d.pop(k, None)
         return stable_hash(d)
+
+    @property
+    def rng_seed(self) -> int:
+        return self.seed if self.train_seed is None else self.train_seed
 
     def gsr_cache_key(self) -> str:
         """Everything the refined graph depends on."""

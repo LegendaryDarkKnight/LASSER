@@ -18,7 +18,8 @@ import pytest
 import lasser
 from conftest import DATA_DIR, GPU, TEST_DIR
 
-GSR_MODULES = ["lasser.data", "lasser.views", "lasser.pretrain", "lasser.refine", "lasser.checks", "lasser.graph"]
+GSR_MODULES = ["lasser.data", "lasser.views", "lasser.pretrain", "lasser.refine", "lasser.checks", "lasser.graph",
+               "lasser.batching"]
 
 SCRIPT = textwrap.dedent("""
     import json, sys

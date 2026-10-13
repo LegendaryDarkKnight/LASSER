@@ -45,15 +45,32 @@ def better_sign(metric: str) -> int:
 
 
 # ------------------------------------------------------------------ loading
+_TAG = r"^(?P<arm>.+)_seed(?P<split>\d+)(?:_ts(?P<ts>\d+))?$"
+
+
 def load_runs(out_dir: str, include_subsampled: bool = False) -> pd.DataFrame:
-    """runs.csv with an ``arm`` column; one run per (arm, seed) - the latest."""
+    """runs.csv with ``arm`` and ``rep`` columns; one run per (arm, split, rep) - the latest.
+
+    ``rep`` is the training seed of a replicate (``_ts<n>`` in the run tag), 0 for the
+    default (training seed = split seed). Runs of different arms with the same split and
+    rep share model initialisation and batch order, so they are paired.
+    """
     t = read_runs_csv(os.path.join(out_dir, "runs.csv"))
     if not include_subsampled and "subsample_cells_per_condition" in t:
         t = t[t["subsample_cells_per_condition"].isna()]
-    t = t[t["run_tag"].notna() & t["run_tag"].str.contains("_seed")].copy()
-    t["arm"] = t["run_tag"].str.rsplit("_seed", n=1).str[0]
-    t = t.sort_values("timestamp").groupby(["arm", "seed"], as_index=False).tail(1)
+    t = t[t["run_tag"].notna()].copy()
+    m = t["run_tag"].str.extract(_TAG)
+    keep = m["arm"].notna()
+    t, m = t[keep].copy(), m[keep]
+    t["arm"] = m["arm"]
+    t["rep"] = m["ts"].fillna(0).astype(int)
+    t = t.sort_values("timestamp").groupby(["arm", "seed", "rep"], as_index=False).tail(1)
     return t.reset_index(drop=True)
+
+
+def _split_means(d: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
+    """Average replicates (rep) within each split: the split is the unit of replication."""
+    return d.groupby(list(keys) + ["seed"], as_index=False)["value"].mean()
 
 
 def _json(run_dir: str, rel: str) -> Optional[dict]:
@@ -89,15 +106,18 @@ def metrics_long(runs: pd.DataFrame) -> pd.DataFrame:
         for scope, d in scopes.items():
             for m, v in d.items():
                 if m != "n_perts":
-                    rows.append(dict(arm=r.arm, seed=r.seed, family="paper", scope=scope, metric=m, value=v))
+                    rows.append(dict(arm=r.arm, seed=r.seed, rep=r.rep, family="paper", scope=scope, metric=m,
+                                     value=v))
         lsc = {"overall": tm["lasser"]["overall"], **tm["lasser"]["subgroups"]}
         for scope, d in lsc.items():
             for stream, arm in (("model", r.arm), ("no_perturb", "No-perturb"), ("mean_perturb", "Mean-perturb")):
                 if stream not in d or (stream != "model" and (r.seed, scope, stream) in refs_done):
                     continue
-                refs_done.add((r.seed, scope, stream))
+                if stream != "model":
+                    refs_done.add((r.seed, scope, stream))
                 for m, v in d[stream].items():
-                    rows.append(dict(arm=arm, seed=r.seed, family="lasser", scope=scope, metric=m, value=v))
+                    rows.append(dict(arm=arm, seed=r.seed, rep=r.rep if stream == "model" else 0,
+                                     family="lasser", scope=scope, metric=m, value=v))
     return pd.DataFrame(rows)
 
 
@@ -145,7 +165,8 @@ def paper_reference_baselines(runs: pd.DataFrame, h5ad_path: str) -> pd.DataFram
             for scope, d in {"overall": overall, **groups}.items():
                 for m, v in d.items():
                     if m != "n_perts":
-                        rows.append(dict(arm=name, seed=seed, family="paper", scope=scope, metric=m, value=v))
+                        rows.append(dict(arm=name, seed=seed, rep=0, family="paper", scope=scope, metric=m,
+                                         value=v))
     return pd.DataFrame(rows)
 
 
@@ -155,6 +176,7 @@ def summary_table(long: pd.DataFrame, metrics: Sequence[str], family: str = "pap
                   digits: int = 3) -> pd.DataFrame:
     """Rows = arms, columns = (scope, metric), cells = 'mean ± sd (n)'."""
     d = long[(long.family == family) & long.metric.isin(metrics) & long.scope.isin(scopes)]
+    d = _split_means(d, ["arm", "scope", "metric"])
     g = d.groupby(["arm", "scope", "metric"])["value"].agg(["mean", "std", "count"]).reset_index()
     g["cell"] = g.apply(lambda r: f"{r['mean']:.{digits}f} ± {0 if pd.isna(r['std']) else r['std']:.{digits}f}"
                                   f" (n={int(r['count'])})", axis=1)
@@ -182,7 +204,7 @@ def _holm(p: np.ndarray) -> np.ndarray:
 
 
 def paired_tests(long: pd.DataFrame, ref: str, arms: Sequence[str], metrics: Sequence[str],
-                 family: str = "paper", scopes: Sequence[str] = ("overall",)) -> pd.DataFrame:
+                 family: str = "paper", scopes: Sequence[str] = ("overall",), unit: str = "split") -> pd.DataFrame:
     """Per-split paired comparison of each arm against ``ref`` (same seeds only).
 
     ``improvement`` is oriented so that > 0 means the arm is better. p-values: paired
@@ -192,7 +214,11 @@ def paired_tests(long: pd.DataFrame, ref: str, arms: Sequence[str], metrics: Seq
     from scipy import stats
 
     d = long[(long.family == family) & long.metric.isin(metrics) & long.scope.isin(scopes)]
-    w = d.pivot_table(index=["scope", "metric", "seed"], columns="arm", values="value")
+    if unit == "split":     # replicates averaged within a split; n = number of splits
+        d = _split_means(d, ["arm", "scope", "metric"])
+        w = d.pivot_table(index=["scope", "metric", "seed"], columns="arm", values="value")
+    else:                   # "run": every (split, training seed) pair counts; n = number of paired runs
+        w = d.pivot_table(index=["scope", "metric", "seed", "rep"], columns="arm", values="value")
     rows = []
     for arm in arms:
         if arm == ref or arm not in w or ref not in w:
@@ -209,7 +235,7 @@ def paired_tests(long: pd.DataFrame, ref: str, arms: Sequence[str], metrics: Seq
                 p_w = stats.wilcoxon(b, a).pvalue if n > 1 and np.any(b != a) else np.nan
             except ValueError:
                 p_w = np.nan
-            rows.append(dict(arm=arm, ref=ref, scope=scope, metric=metric, n_splits=n,
+            rows.append(dict(arm=arm, ref=ref, scope=scope, metric=metric, unit=unit, n_splits=n,
                              ref_mean=a.mean(), arm_mean=b.mean(), improvement=mean,
                              ci95_low=mean - half, ci95_high=mean + half,
                              rel_improvement_pct=100 * mean / abs(a.mean()) if a.mean() != 0 else np.nan,
@@ -233,7 +259,7 @@ def per_perturbation(runs: pd.DataFrame) -> pd.DataFrame:
             continue
         for p, d in tm["per_perturbation"].items():
             for m, v in d.items():
-                rows.append(dict(arm=r.arm, seed=r.seed, pert=p, subgroup=pert2sub.get(p, "other"),
+                rows.append(dict(arm=r.arm, seed=r.seed, rep=r.rep, pert=p, subgroup=pert2sub.get(p, "other"),
                                  metric=m, value=v))
     return pd.DataFrame(rows)
 
@@ -264,8 +290,8 @@ def paired_perturbation(pp: pd.DataFrame, ref: str, arm: str, metrics: Sequence[
     rng = np.random.default_rng(seed)
     rows = []
     for metric in metrics:
-        a = pp[(pp.arm == ref) & (pp.metric == metric)].set_index(["seed", "pert"])
-        b = pp[(pp.arm == arm) & (pp.metric == metric)].set_index(["seed", "pert"])
+        a = pp[(pp.arm == ref) & (pp.metric == metric)].set_index(["seed", "rep", "pert"])
+        b = pp[(pp.arm == arm) & (pp.metric == metric)].set_index(["seed", "rep", "pert"])
         j = a[["value", "subgroup"]].join(b[["value"]], lsuffix="_ref", rsuffix="_arm", how="inner").dropna()
         j["imp"] = better_sign(metric) * (j["value_arm"] - j["value_ref"])
         j = j.reset_index()
@@ -335,7 +361,8 @@ def gene_group_metrics(runs: pd.DataFrame, top_k: int = 20) -> pd.DataFrame:
                         "mse_topk": float(np.mean((dp[top] - dt[top]) ** 2)),
                         "frac_opposite_topk": float(np.mean(np.sign(dp[top]) * np.sign(dt[top]) < 0))}
                 for m, v in vals.items():
-                    rows.append(dict(arm=r.arm, seed=r.seed, pert=p, gene_group=gname, metric=m, value=v))
+                    rows.append(dict(arm=r.arm, seed=r.seed, rep=r.rep, pert=p, gene_group=gname, metric=m,
+                                     value=v))
     return pd.DataFrame(rows)
 
 
@@ -347,7 +374,7 @@ def gene_group_paired(gg: pd.DataFrame, ref: str, arms: Sequence[str]) -> pd.Dat
     rows = []
     for arm in arms:
         for (group, metric), sub in gg[gg.arm.isin([ref, arm])].groupby(["gene_group", "metric"]):
-            w = sub.pivot_table(index=["seed", "pert"], columns="arm", values="value").dropna()
+            w = sub.pivot_table(index=["seed", "rep", "pert"], columns="arm", values="value").dropna()
             if ref not in w or arm not in w:
                 continue
             imp = GENE_GROUP_DIRECTION[metric] * (w[arm] - w[ref])
@@ -367,7 +394,7 @@ def training_curves(runs: pd.DataFrame) -> pd.DataFrame:
         p = os.path.join(r.run_dir, "metrics", "epoch_log.csv")
         if os.path.exists(p):
             e = pd.read_csv(p)
-            e["arm"], e["seed"] = r.arm, r.seed
+            e["arm"], e["seed"], e["rep"] = r.arm, r.seed, r.rep
             rows.append(e)
     return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
@@ -379,7 +406,7 @@ def graph_table(runs: pd.DataFrame) -> pd.DataFrame:
         g = _pkl(r.run_dir, "graphs/coexpress_graph.pkl")
         if g is None:
             continue
-        row = dict(arm=r.arm, seed=r.seed, source=g["source"], **g["stats"])
+        row = dict(arm=r.arm, seed=r.seed, rep=r.rep, source=g["source"], **g["stats"])
         ch = _json(r.run_dir, "graphs/checks.json")
         if ch:
             h2 = ch.get("h2", {})
@@ -407,7 +434,7 @@ def added_pairs(run_dir: str, actions: Iterable[str] = ("add", "topup", "random"
 def edge_stability(runs: pd.DataFrame, arm: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Jaccard of the new-edge sets between splits, and how many splits each pair appears in."""
     sets, scores = {}, []
-    for r in runs[runs.arm == arm].itertuples():
+    for r in runs[runs.arm == arm].drop_duplicates("seed").itertuples():   # replicates share the graph
         a = added_pairs(r.run_dir)
         sets[int(r.seed)] = set(zip(a.u, a.v))
         a["seed"] = r.seed
@@ -438,7 +465,7 @@ def consensus_edges(runs: pd.DataFrame, arm: str = "LASSER", min_splits: int = 3
     r0 = runs[runs.arm == arm].iloc[0]
     genes = _pkl(r0.run_dir, "graphs/coexpress_graph.pkl")["gene_list"]
     knn = set()
-    for r in runs[runs.arm == "GEARS-kNN8"].itertuples():
+    for r in runs[runs.arm.isin(["GEARS-kNN8", "GEARS-kNN8-fix"])].itertuples():
         g = _pkl(r.run_dir, "graphs/coexpress_graph.pkl")
         s, d = g["edge_index"]
         knn |= set(zip(np.minimum(s, d).tolist(), np.maximum(s, d).tolist()))
@@ -452,8 +479,9 @@ def consensus_edges(runs: pd.DataFrame, arm: str = "LASSER", min_splits: int = 3
 def overlap_with_knn8(runs: pd.DataFrame, arm: str = "LASSER") -> pd.DataFrame:
     """Per split: share of the arm's new edges that the density-matched Pearson graph also has."""
     rows = []
-    for r in runs[runs.arm == arm].itertuples():
-        k = runs[(runs.arm == "GEARS-kNN8") & (runs.seed == r.seed)]
+    knn_arm = "GEARS-kNN8-fix" if arm.endswith("-fix") else "GEARS-kNN8"
+    for r in runs[runs.arm == arm].drop_duplicates("seed").itertuples():
+        k = runs[(runs.arm == knn_arm) & (runs.seed == r.seed)]
         if k.empty:
             continue
         g = _pkl(k.iloc[0].run_dir, "graphs/coexpress_graph.pkl")
