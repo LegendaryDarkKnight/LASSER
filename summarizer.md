@@ -2,7 +2,7 @@
 
 Read this at the start of a new session. It records what has been built, what was decided, and what comes next. Details are in `LASSER.md` (usage, config fields, run-folder layout), `gsr_coexpression_plan.md` (method) and `claude_code_prompt_gsr_gears.md` (task spec).
 
-## Status (2026-10-12)
+## Status (2026-10-13: see study session 1 in the run log)
 
 - **All tests pass on Kaggle** (run 04, commit `02a13c9`): 13 passed, plus the full-Norman smoke test with the flag off and on. The `eval.py` hash test is skipped because the user untracked `eval.py`.
 - **First full result (seed 1, 20 epochs, T4)**, from `runs.csv`:
@@ -71,6 +71,24 @@ What run 02 measured (smoke test: full Norman, T4):
 - **Issue to discuss (not fixed):** in the S view, every gene that is isolated in A0 (88% of genes) gets the same "missing" input. They all end up with identical S embeddings, so the S-view link AUC is about 0.23 (below chance). In refinement, the S term is constant for pairs of such genes. The same applies to E and R missing genes. Options: score only views where both genes are non-missing, renormalising β per pair; or drop S, since A0 is nearly empty.
 
 **Next:** push, re-run notebook cells 1–3 (and 3b), and send the output. Decide what to do about the missing-gene / S-view issue.
+
+**Study session 1 (2026-10-12/13, `notebooks/lasser-study_after_run.ipynb`, `lasser_study_results.zip`, commit `f72d2b6`).**
+
+- **Only 7/38 runs finished:** GEARS splits 2–5 and LASSER splits 1–3.
+  - Worker 0 (GPU 0) was killed at the start (exit -9, out of RAM: two workers each load Norman plus GEARS's per-epoch prediction arrays, about 15 GB each).
+  - Its claim on `GEARS_seed1` was never released, so one GPU did all the work.
+  - Fixed: `launch` now starts only as many workers as RAM allows (`max_parallel_workers`: RAM ÷ 15 GB − 1, which is **1 on Kaggle**); loads data one worker at a time (lock); detects dead workers, frees their claims and prints the exit code and the end of their log.
+  - `test_06_study.py` failed only because of its own fake data (fewer than 3 connected genes); fixed.
+- **Results so far: no detectable effect of the learned graph.**
+  - Paired splits 2 and 3: Pearson Δ GEARS 0.524 / 0.547 vs LASSER 0.523 / 0.551.
+  - Per-perturbation paired (226 pairs): mean improvement +0.002, 95% CI [−0.003, 0.006]; 54% of perturbations improved.
+  - **Replicate check:** LASSER on split 1 scored 0.574 in run 04 and 0.491 now. Same split (hash `f93e7d59…`), nearly the same graph (45,192 vs 45,107 edges; the CSR canonicalisation changed it slightly). So run-to-run noise on one split is about 0.08, larger than run 04's apparent +0.04 gain. Likely sources: GPU nondeterminism (`deterministic=False`) and GEARS keeping the epoch with the best (noisy) validation DE-MSE.
+  - This is expected from the batching quirk: the co-expression graph reaches only the first cell of each batch.
+- **The learned edges carry real but weak signal:**
+  - H2 hit rate 0.033 vs 0.001 for degree-matched random (A0: 0.605).
+  - Between splits, new-edge sets have Jaccard 0.027; 333 pairs recur in at least 3 of 3 splits.
+  - Top consensus edges form a coherent cell-cycle module (CDCA8, CENPA, AURKA, BIRC5, CKS2), which is useful for the "reasoning" part.
+- **Open decision for the user:** continue the study as is (likely a well-powered null result), or first add an opt-in batching fix and/or training-seed replicates. See the conversation of 2026-10-13.
 
 ## Decisions made with the user
 

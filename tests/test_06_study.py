@@ -98,7 +98,7 @@ def _fake_run(out_dir, arm, seed, shift, rng):
     true = {p: ctrl + rng.normal(0, 0.1, len(GENES)) for p in allp}
     pickle.dump({"ctrl": ctrl, "pred_mean": pred, "true_mean": true, "gene_list": GENES},
                 open(os.path.join(run_dir, "metrics", "predictions.pkl"), "wb"))
-    a0 = np.array([[1, 2, 3, 0], [0, 0, 1, 0]])
+    a0 = np.array([[1, 2, 3, 0, 4, 5, 6], [0, 0, 1, 0, 2, 3, 4]])   # genes 0-4 connected (>= 3 per group)
     ei = a0 if arm == "GEARS" else np.concatenate([a0, rng.integers(0, len(GENES), (2, 30))], 1)
     rec = {"edge_index": ei, "edge_weight": np.ones(ei.shape[1], np.float32), "gene_list": GENES,
            "source": "gears_static" if arm == "GEARS" else "gsr_refined",
@@ -107,7 +107,8 @@ def _fake_run(out_dir, arm, seed, shift, rng):
     if arm != "GEARS":
         pickle.dump(dict(rec, edge_index=a0, source="gears_static"),
                     open(os.path.join(run_dir, "graphs", "a0_graph.pkl"), "wb"))
-        pd.DataFrame({"source": ei[0, 4:], "target": ei[1, 4:], "action": "add", "score": 0.8}) \
+        k = a0.shape[1]
+        pd.DataFrame({"source": ei[0, k:], "target": ei[1, k:], "action": "add", "score": 0.8}) \
             .to_csv(os.path.join(run_dir, "graphs", "edits.csv"), index=False)
         json.dump({"h2": {"hit_rate_added": 0.04, "hit_rate_degree_matched_random": 0.002, "hit_rate_a0": 0.5},
                    "pretrain": {"best_link_auc": 0.98, "baseline_link_auc": {"combined": 0.97}}},

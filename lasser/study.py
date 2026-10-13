@@ -215,7 +215,9 @@ def run_worker(jobs: List[Dict[str, Any]], session: str, deadline: float, worker
         res = None
         try:
             if pert_data is None:
-                pert_data = load_pert_data(cfg)
+                from .tracking import file_lock
+                with file_lock(os.path.join(out_dir, "data_load.lock")):   # one worker loads at a time
+                    pert_data = load_pert_data(cfg)
             res = run_experiment(cfg, pert_data)
             logger.info("worker %d: finished %s -> %s", worker, job["job_id"], res["run_dir"])
         except Exception as e:  # keep going; the next session retries unfinished jobs
@@ -254,12 +256,64 @@ def run_prep(jobs: List[Dict[str, Any]]) -> None:
 
 
 # ---------------------------------------------------------------- launcher
+WORKER_RAM_GB = 15.0   # one worker's peak: Norman cell graphs (~6 GB) + GEARS's per-epoch prediction arrays
+
+
+def total_ram_gb() -> Optional[float]:
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / 2**20
+    except OSError:
+        pass
+    return None
+
+
+def max_parallel_workers(n_gpus: int, worker_ram_gb: float = WORKER_RAM_GB) -> int:
+    """How many workers fit in RAM. Kaggle's T4 x2 machine (~31 GB) fits one: run 1 of the
+    study had its second worker killed by the OOM killer (exit -9)."""
+    ram = total_ram_gb()
+    if ram is None:
+        return max(n_gpus, 1)
+    # keep one worker's worth of RAM for the notebook kernel and the system
+    return max(1, min(n_gpus, int(ram // worker_ram_gb) - 1))
+
+
 def _python_cmd(*args: str) -> List[str]:
     return [sys.executable, "-m", "lasser.study", *args]
 
 
 def _pkg_parent() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _tail(path: str, n: int) -> str:
+    try:
+        with open(path, errors="replace") as f:
+            return "\n".join("    " + l.rstrip() for l in f.readlines()[-n:])
+    except OSError:
+        return "    (no log)"
+
+
+def _release_claims_of(out_dir: str, session: str, pid: int, jobs: List[Dict[str, Any]]) -> List[str]:
+    """Remove the claims a dead worker held on unfinished jobs, so another worker can take them."""
+    d = os.path.join(out_dir, "claims", session)
+    if not os.path.isdir(d):
+        return []
+    done = done_hashes(out_dir)
+    hashes = {j["job_id"]: j["config_hash"] for j in jobs}
+    freed = []
+    for job_id in os.listdir(d):
+        try:
+            with open(os.path.join(d, job_id)) as f:
+                owner = int(f.read().split()[0])
+        except (OSError, ValueError, IndexError):
+            continue
+        if owner == pid and hashes.get(job_id) not in done:
+            _release(out_dir, session, job_id)
+            freed.append(job_id)
+    return freed
 
 
 def prepare_data(jobs: List[Dict[str, Any]], jobs_path: Optional[str] = None) -> int:
@@ -289,7 +343,12 @@ def launch(jobs: List[Dict[str, Any]], gpus: Optional[Sequence[int]] = None, bud
 
     out_dir = jobs[0]["config"]["out_dir"]
     if gpus is None:
-        gpus = list(range(torch.cuda.device_count())) or [None]
+        avail = list(range(torch.cuda.device_count())) or [None]
+        n = max_parallel_workers(len(avail))
+        gpus = avail[:n]
+        if n < len(avail):
+            print(f"{len(avail)} GPUs but RAM ({total_ram_gb():.0f} GB) fits {n} worker(s) of ~{WORKER_RAM_GB:.0f} GB; "
+                  f"using GPU(s) {gpus}. Pass gpus=[0, 1] to override.")
     session = session or _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     jobs_path = save_jobs(jobs, os.path.join(out_dir, "jobs.json"))
     deadline = time.time() + budget_hours * 3600
@@ -317,17 +376,27 @@ def launch(jobs: List[Dict[str, Any]], gpus: Optional[Sequence[int]] = None, bud
         print(f"worker {i}: GPU {gpu}, pid {p.pid}, log {log.name}")
         time.sleep(30)  # stagger data loading
 
+    reported = set()
     while any(p.poll() is None for p, _ in procs):
         time.sleep(poll_minutes * 60)
+        for i, (p, log) in enumerate(procs):
+            if p.poll() is not None and i not in reported:
+                reported.add(i)
+                freed = _release_claims_of(out_dir, session, p.pid, jobs)
+                hint = " (killed: most likely out of RAM)" if p.returncode == -9 else ""
+                print(f"worker {i} exited with code {p.returncode}{hint}; freed {freed or 'no'} unfinished job(s); "
+                      "last log lines:\n" + _tail(log.name, 8))
         st = study_status(jobs)
         stamp = _dt.datetime.now().strftime("%H:%M")
         running = sorted(os.listdir(os.path.join(out_dir, "claims", session))) \
             if os.path.isdir(os.path.join(out_dir, "claims", session)) else []
         running = [r for r in running if not st.loc[st.job_id == r, "done"].any()]
         print(f"[{stamp}] done {int(st.done.sum())}/{len(st)} | running: {', '.join(running) or '-'}")
-    for p, log in procs:
+    for i, (p, log) in enumerate(procs):
         log.close()
-        print(f"worker exited with code {p.returncode}")
+        hint = " (killed: most likely out of RAM)" if p.returncode == -9 else ""
+        print(f"worker {i} exited with code {p.returncode}{hint}")
+        _release_claims_of(out_dir, session, p.pid, jobs)
     fails = os.path.join(out_dir, "failures.csv")
     if os.path.exists(fails):
         print(f"failures so far: {len(pd.read_csv(fails))} (see {fails})")
