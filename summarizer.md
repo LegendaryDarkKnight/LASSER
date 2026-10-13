@@ -2,27 +2,15 @@
 
 Read this at the start of a new session. It records what has been built, what was decided, and what comes next. Details are in `LASSER.md` (usage, config fields, run-folder layout), `gsr_coexpression_plan.md` (method) and `claude_code_prompt_gsr_gears.md` (task spec).
 
-## Status (2026-10-13: option-1 study ready; see the run log)
+## Status (2026-10-13: experiments finished; paper drafted)
 
-- **All tests pass on Kaggle** (run 04, commit `02a13c9`): 13 passed, plus the full-Norman smoke test with the flag off and on. The `eval.py` hash test is skipped because the user untracked `eval.py`.
-- **First full result (seed 1, 20 epochs, T4)**, from `runs.csv`:
-
-  | | GEARS | LASSER |
-  |---|---|---|
-  | Pearson Δ | 0.534 | 0.574 |
-  | MSE top-20 DE | 0.210 | 0.188 |
-  | Pearson Δ, unseen single | 0.464 | 0.494 |
-  | Pearson Δ, combo seen 2 | 0.563 | 0.633 |
-
-  One split only; this is not evidence yet. Each run takes about 83 min of training plus 3 min of evaluation.
-- **Study built (2026-10-12): `notebooks/lasser_study.ipynb` plus `lasser/study.py`, `lasser/analysis.py` and `lasser/figures.py`.** The user chose core + controls + ablations on GPU T4 x2:
-  - Core (5 splits): GEARS, LASSER.
-  - Controls (5 splits): GEARS-kNN8, LASSER-random.
-  - Ablations (splits 1–3): noS, Eonly, addonly, embinit, m2, m10.
-  - 38 runs in total, about 54 GPU-hours, about 3 Kaggle sessions with 2 parallel workers.
-- New library feature: `GSRConfig.edge_control="random"` (the random-edge control, `refine.randomize_new_edges`).
-- Concurrency safety: `runs.csv` appends are file-locked; GSR cache entries are written to a temporary folder and then renamed; hash columns are read as text.
-- **Next step:** push. The user runs `lasser_study.ipynb` (commit mode), then resumes with `RESUME_FROM` until all 38 jobs are done, and sends the outputs (`lasser_study_results.zip` or the notebook). The new code has only been syntax-checked; cell 4 runs `test_06_study.py` on synthetic data first.
+- **Decision:** the project is written up as an **analysis / negative-result paper**. The draft is in `paper/` (`main.tex`, `refs.bib`, `figures/`, `README.md` with venues and the to-do list). The user asked for no further code runs.
+- **Core findings:**
+  1. GEARS's co-expression prior is nearly empty (87–89% of genes have no neighbour) and, because of the batching defect, reaches only the first cell of each batch.
+  2. With the fix, learned, original Pearson, density-matched Pearson and random-rewired graphs perform alike, within run-to-run noise.
+  3. The learned graph is informative (held-out co-expression about 18× random; 346 edges stable across splits forming cell-cycle, proteasome and nucleolar modules).
+  4. **Mechanism:** the co-expression GNN smooths a free learnable table (`emb_pos`) that is independent of the cell's expression, so any graph only re-parameterises per-gene biases. In GEARS, `x` enters only as the final residual. The user's earlier IDGL and Poincaré attempts also gave no gains, which is consistent with this.
+- **Open:** see the to-do list in `paper/README.md` (authors, earlier-attempt details, citation checks, the Figure 1 title overlap, and optional strengthening runs).
 
 ## Kaggle run log
 
@@ -93,6 +81,13 @@ What run 02 measured (smoke test: full Norman, T4):
   - `study.FIX_PLAN` with arms GEARS-fix, LASSER-fix, GEARS-kNN8-fix and LASSER-random-fix, 10 epochs; the analysis handles replicates (`rep`, `unit="split"|"run"`).
   - `notebooks/lasser_fix_study.ipynb`; `tests/test_07_fix.py`.
   - **Next:** the user runs `lasser_fix_study.ipynb` (10 h) and sends back `lasser_fix_study_results.zip` plus the notebook.
+
+**Study 2 / option-1 fix study (2026-10-13, `notebooks/lasser_fix_study_after_run.ipynb`, `lasser_fix_study_results.zip`).** 10 runs on one T4, 10 epochs each (42–50 min per run).
+- Pearson Δ, mean ± sd over splits 1–3: GEARS-fix 0.540 ± 0.023, LASSER-fix 0.527 ± 0.008, LASSER-random-fix 0.526 ± 0.029; GEARS-kNN8-fix 0.509 (split 1 only). Additive 0.407, no-perturbation 0.
+- Paired: LASSER-fix − GEARS-fix = −0.013, 95% CI [−0.052, 0.027], 0/3 splits better; per perturbation −0.012 [−0.029, 0.001], 43% improved. LASSER-fix − random = +0.002 [−0.081, 0.084]. MSE differences are ≤ 0.002.
+- Gene groups: no gain on genes isolated in A0 (−0.015 ± 0.021).
+- Graph: H2 hit rate of new edges 0.034–0.037 vs 0.001–0.002 random vs 0.58–0.66 A0; link AUC 0.973–0.997 (raw features 0.956–0.979); 346 consensus pairs, 44.5% of them also in the kNN8 graph.
+- Not run: tiers 3 (partly), 4, 5 and 6, i.e. kNN8 on splits 2–3, unfixed GEARS at 10 epochs, replicates and splits 4–5.
 
 ## Decisions made with the user
 
@@ -174,9 +169,5 @@ Only `run.py` imports `graph.py`, and only when `graph_learning=True`. That is w
 
 ## Open items / next steps
 
-1. Run the study (`notebooks/lasser_study.ipynb`) and fix anything `test_06_study.py` or the workers report.
-2. After it finishes, interpret Tables 1–5 and Figs. 1–6. The claim stands only if LASSER beats **both** controls (GEARS-kNN8 and LASSER-random), not just GEARS.
-3. Still open: the S view gives 88% of genes (isolated in A0) identical embeddings (S link AUC about 0.23). The `LASSER-noS` and `LASSER-Eonly` ablations answer it empirically; if noS is as good or better, drop S from the method.
-4. Possible later additions:
-   - external validation of consensus edges (STRING/TRRUST; needs the data files);
-   - a second dataset (e.g. Replogle K562), if reviewers ask.
+1. Finish the paper (`paper/README.md` to-do list): authors, details of the earlier attempts, verifying citations, re-rendering Figure 1, choosing the venue.
+2. Optional strengthening runs, only if the user wants them: splits 4–5, training-seed replicates, a second dataset, and the self-loops-only control that directly tests the re-parameterisation argument.

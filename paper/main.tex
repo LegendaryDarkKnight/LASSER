@@ -1,0 +1,457 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=2.4cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{caption}
+\captionsetup{font=small,labelfont=bf}
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\GEARS}{\textsc{GEARS}}
+\newcommand{\LASSER}{\textsc{LASSER}}
+
+\title{Does the gene co-expression graph matter in GEARS?\\
+\large Learned, density-matched and random graphs give the same perturbation predictions}
+
+\author{\todo{author names and affiliations}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Graph neural networks for predicting transcriptional responses to genetic perturbations rely on gene--gene graphs as
+priors. \GEARS{}~\cite{roohani2024gears} combines a Gene Ontology graph over perturbed genes with a gene
+co-expression graph over output genes. A natural hypothesis is that a better co-expression graph should improve
+prediction. We test it with \LASSER{}, a self-supervised, multi-view graph-structure-learning method in the spirit
+of GSR~\cite{zhao2023gsr}, under a leakage-safe protocol with exact parity to upstream \GEARS{}.
+We report three findings on the Norman et al.\ combinatorial CRISPRa screen~\cite{norman2019}.
+\textbf{(i)}~The co-expression module of the reference implementation is largely inert. Its Pearson graph leaves
+87\% of genes without neighbours, and a batching defect means that only the first cell of each mini-batch receives
+graph messages.
+\textbf{(ii)}~Once the defect is fixed, the learned graph, a random graph with identical degrees and weights, and a
+density-matched Pearson graph all perform like the original sparse graph. Learned minus original Pearson~$\Delta$:
+$-0.013$, 95\% CI $[-0.052, 0.027]$, 0/3 splits better. All differences are smaller than the run-to-run
+variability of a single configuration ($\approx 0.08$).
+\textbf{(iii)}~This is not because the learned graph is uninformative. Its new edges are co-expressed in held-out
+cells 18$\times$ more often than random pairs, and the edges that recur across splits form coherent modules
+(mitosis, proteasome, nucleolar/ribosome biogenesis).
+We trace the null result to the architecture. In \GEARS{} the co-expression GNN smooths a learnable embedding table
+that does not depend on the cell's expression, so any graph acts as a re-parameterisation of free per-gene
+parameters. We argue that graph priors over output genes can only matter if they propagate cell- or
+perturbation-specific signals, and we give recommendations for evaluating graph priors in perturbation models.
+\end{abstract}
+
+% =====================================================================================
+\section{Introduction}
+
+Predicting the transcriptional outcome of unseen genetic perturbations, in particular combinations, is a central
+task for in-silico screening. \GEARS{}~\cite{roohani2024gears} is a widely used graph-based approach. It encodes
+prior knowledge through two graphs. A Gene Ontology (GO) similarity graph over perturbable genes lets unseen
+perturbations borrow from functionally related seen ones. A co-expression graph over output genes, built once from
+Pearson correlations in training cells, is meant to share information between genes that move together.
+
+The co-expression graph is an obvious target for improvement. It is fixed, built by thresholding noisy
+single-cell correlations, and blind to the task. Graph structure learning (GSL) methods, either jointly with the
+task (e.g.\ IDGL~\cite{chen2020idgl}, LDS~\cite{franceschi2019lds}) or self-supervised and decoupled from it
+(GSR~\cite{zhao2023gsr}), have improved node-level prediction elsewhere. In preliminary work we tried task-driven
+GSL (IDGL-style learning of a cosine-similarity graph from embeddings) and hyperbolic GO embeddings
+(Poincar\'e~\cite{nickel2017poincare}) inside \GEARS{}, and saw no gains
+\todo{one or two sentences with the exact settings and numbers of these earlier attempts}. Those attempts also had
+practical problems: dense learned graphs that didn't fit in memory, unstable optimisation and embedding collapse.
+That motivated the decoupled, memory-safe design studied here.
+
+This paper asks a sharper question: \emph{does the co-expression graph matter at all in \GEARS{}, and if not, why?}
+Our contributions are:
+\begin{enumerate}
+  \item A leakage-safe experimental harness around \GEARS{} that reproduces the upstream model bit-for-bit when graph
+        learning is off. Parity is verified on graph tensors, initial weights, the first training losses and the
+        final model.
+  \item \LASSER{}, a self-supervised multi-view graph-structure learner for output genes (pretrain, refine once,
+        then train \GEARS{} unchanged). It uses only training cells and is memory-safe (no dense $N{\times}N$ tensor
+        in autograd).
+  \item The identification of a batching defect in the reference implementation that confines co-expression
+        message passing to the first cell of each mini-batch, and an opt-in fix.
+  \item A controlled comparison, with the batching fix, of the original Pearson graph, the learned graph, a
+        density-matched Pearson graph and a degree- and weight-preserving random rewiring. All perform alike, within
+        run-to-run variability.
+  \item A mechanistic explanation. In \GEARS{} the co-expression GNN never sees cell-specific input, so graph
+        structure can only re-parameterise free per-gene embeddings. That explains why no graph-learning paradigm
+        we tried changed the predictions.
+\end{enumerate}
+
+% =====================================================================================
+\section{Background}
+
+\paragraph{GEARS.} For a control cell with expression $x\in\mathbb{R}^{N}$ ($N{=}5{,}045$ genes) and a set of
+perturbed genes, \GEARS{} computes per-gene embeddings from two learnable tables:
+\begin{equation}
+  h_g = \mathrm{MLP}\!\left(\mathrm{ReLU}(\mathrm{BN}(E_g)) + 0.2\,\big[\mathrm{SGConv}_{A}(P)\big]_g\right),
+  \label{eq:gears}
+\end{equation}
+where $E, P \in \mathbb{R}^{N\times d}$ are embedding tables and $A$ is the co-expression graph. Perturbation
+embeddings, propagated over the GO graph, are added to every gene of the perturbed cell. Gene-specific decoders and
+a cross-gene MLP then produce the predicted change, and $x$ is added as a residual at the end. Two properties of the
+reference implementation are central to this paper:
+\begin{itemize}
+  \item \textbf{The co-expression path is cell-independent.} The input to $\mathrm{SGConv}_A$ is the table $P$, the
+        same for every cell. The cell's expression $x$ enters only through the final residual. So
+        $\mathrm{SGConv}_A(P)$ is a fixed matrix of per-gene vectors, a smooth function of free parameters.
+  \item \textbf{Batching defect.} Embeddings of the $B$ cells in a mini-batch are stacked into $BN$ nodes, but
+        $\mathrm{SGConv}_A$ is called with the single-cell \texttt{edge\_index} (node ids $0,\dots,N{-}1$). Only the
+        first cell's copy aggregates neighbours; the other $B{-}1$ copies receive only their own self-loop, i.e.\ a
+        linear map of $P$.
+\end{itemize}
+
+\paragraph{Graph structure learning.} Task-driven GSL learns the graph jointly with the downstream
+loss~\cite{chen2020idgl,franceschi2019lds}. GSR~\cite{zhao2023gsr} instead pretrains multi-view node encoders by
+contrastive link prediction~\cite{oord2018infonce,he2020moco}, refines the graph once by adding and removing edges
+by embedding similarity, and then trains the task model on the fixed refined graph. This decoupling is attractive
+here because the task offers few independent training signals (138 training perturbations per split).
+
+\paragraph{Baselines in perturbation prediction.} Recent benchmarks report that deep perturbation models,
+\GEARS{} included, often do not outperform simple additive or linear baselines~\cite{ahlmanneltze2025linear,
+csendes2024benchmark}. Our results add a mechanistic reason why one of \GEARS{}' two priors contributes little.
+
+% =====================================================================================
+\section{Methods}
+
+\subsection{Data, splits and evaluation}
+We use the Norman et al.\ CRISPRa screen in K562 cells~\cite{norman2019} as processed by \GEARS{}: 5,045 genes,
+single and double perturbations. We use \GEARS{}' \emph{simulation} split (seeds 1--5,
+\texttt{train\_gene\_set\_size}=0.75). Test perturbations are grouped into unseen singles and combinations with
+0, 1 or 2 genes seen in training. In split~1, for example, there are 36, 9, 43 and 19 such perturbations, and 138
+training perturbations. Following the \GEARS{} paper, we compute metrics on mean predicted and mean observed
+expression per test perturbation:
+\begin{itemize}
+  \item Pearson correlation of predicted vs.\ observed change from control, over all genes ($\text{Pearson}\,\Delta$)
+        and over the top-20 differentially expressed (DE) genes;
+  \item MSE on the top-20 DE genes, and its value normalised by the no-perturbation baseline (ratio of means);
+  \item the fraction of top-20 DE genes predicted with the wrong sign.
+\end{itemize}
+Reference baselines are scored with the same code: \emph{no-perturbation} (predict control) and \emph{additive}
+(control plus the sum of the training single-gene changes). The additive baseline equals no-perturbation for unseen
+singles. Note that both baselines predict exactly zero change for some genes, which counts as neither correct nor
+opposite direction, so their low opposite-direction fractions are not comparable with the models'.
+
+\subsection{Harness and leakage control}
+All arms train the unmodified \GEARS{} model, loss, training loop and default hyperparameters (hidden size 64,
+Adam with learning rate $10^{-3}$, weight decay $5{\times}10^{-4}$, batch size 32). The epoch with the lowest
+validation top-20 DE MSE is kept. Everything is implemented in PyTorch and PyTorch Geometric~\cite{fey2019pyg}, with \GEARS{} vendored unchanged.
+The only intervention is the co-expression graph passed to
+\texttt{model\_initialize} (plus, in the second study, the opt-in batching fix). With graph learning off, a test
+suite verifies exact equality with upstream \GEARS{} in the co-expression and GO graph tensors, the initial
+\texttt{state\_dict}, the first training losses and the best model after an epoch. Everything the graph learner
+sees (features, positives and the base graph) comes from control cells and training-perturbation cells of the
+current split only. A test that permutes and rescales validation and test cells leaves the learned graph
+bit-for-bit unchanged.
+
+\subsection{LASSER: self-supervised co-expression graph refinement}
+\paragraph{Base graph $A_0$.} The \GEARS{} Pearson graph: for each gene, up to 20 neighbours with $|r|>0.4$,
+computed on control cells plus training single-perturbation cells.
+
+\paragraph{Views.} For each gene we build three standardised feature vectors from training data only:
+\begin{itemize}
+  \item E: expression over 500 $k$-means metacells, reduced by PCA to 64 dimensions;
+  \item R: mean change from control across the training perturbations, PCA to 32 dimensions;
+  \item S: DeepWalk~\cite{perozzi2014deepwalk} embedding of $A_0$, 64 dimensions.
+\end{itemize}
+Genes with no signal in a view (zero variance, or isolated in $A_0$) get a learned \emph{missing} token instead of
+a zero vector.
+
+\paragraph{Pretraining.} The training cells are split into halves $H_1/H_2$, stratified by condition.
+\begin{itemize}
+  \item Positives: Pearson top-20 pairs on $H_1$ that stay above the threshold in at least 70\% of 20 bootstrap
+        resamples.
+  \item Negatives: 256 per query, a quarter of them hard (high embedding similarity but low $|r|$ on $H_1$),
+        excluding $A_0$ and positive neighbours.
+  \item Encoders: per view, an MLP, two SGConv layers~\cite{wu2019sgc}, then a linear layer with LayerNorm (no
+        output ReLU). Keys come from momentum encoders ($m{=}0.99$).
+  \item Loss: intra- and inter-view InfoNCE ($\tau{=}0.2$, intra weight $\alpha{=}0.75$) plus a VICReg variance
+        term~\cite{bardes2022vicreg}.
+  \item Training: each epoch, positives are split 70/30 into message edges and target edges, so a target edge is
+        never in the GNN input. Early stopping is on held-out link AUC.
+\end{itemize}
+
+\paragraph{Refinement (once).} Edge scores are a weighted sum ($\beta = 0.4, 0.3, 0.3$ for E, R, S) of min--max
+normalised cosine similarities, computed in chunks without gradients. Per gene, we remove the 10\% weakest $A_0$
+edges and add the top 5 new candidates, top up every gene to in-degree $\ge 5$, and cap new in-edges at 25. Kept
+edges keep their Pearson weight; new edges get $0.5\times$ their score quantile-mapped onto the $A_0$ weight
+distribution. On a T4 GPU the whole procedure takes about 25\,s and under 1.6\,GB.
+
+\subsection{Controls and the batching fix}
+\begin{itemize}
+  \item \textbf{GEARS-kNN8}: the \GEARS{} Pearson graph without threshold, 8 neighbours per gene, i.e.\ about the
+        density of the learned graph.
+  \item \textbf{LASSER-random}: the learned graph with every new edge rewired to a uniformly random source gene
+        (no self-loops, $A_0$ pairs or duplicates). This keeps each gene's in-degree and the weight distribution but
+        destroys \emph{which} genes are connected.
+  \item \textbf{Batching fix} (opt-in, ``-fix''): the co-expression SGConv repeats the graph once per cell with
+        offset node ids. Parameters are unchanged, and with one cell per batch the output is identical to upstream.
+\end{itemize}
+
+\subsection{Studies and statistics}
+\textbf{Study 1 (upstream \GEARS{}, 20 epochs)}: \GEARS{} on splits 2--5 and \LASSER{} on splits 1--3.
+\textbf{Study 2 (batching fix, 10 epochs)}: \GEARS-fix, \LASSER-fix and \LASSER-random-fix on splits 1--3, and
+\GEARS-kNN8-fix on split 1. Within a split, all arms share the model initialisation and batch order, so
+differences isolate the graph.
+\begin{itemize}
+  \item Across splits: mean $\pm$ sd and the paired improvement with a $t$-based 95\% CI. With $n{=}3$ splits,
+        $p$-values carry little information, so we report effect sizes and the number of splits improved.
+  \item Per perturbation: (split, perturbation) pairs, the share improved, Wilcoxon signed-rank, and a 95\%
+        bootstrap CI that resamples splits and then perturbations within splits.
+\end{itemize}
+Hardware: one NVIDIA T4 per run (Kaggle). A 10-epoch run takes 42--50 minutes.
+
+% =====================================================================================
+\section{Results}
+
+\subsection{The co-expression prior of GEARS is sparse and mostly unused}
+Across splits, the \GEARS{} Pearson graph has 5,992--6,364 edges, of which 4,685--4,726 are self-loops.
+4,419--4,495 of the 5,045 genes (87--89\%) have no neighbour at all (Fig.~\ref{fig:graphs}a), because
+$|r|>0.4$ is rare in sparse single-cell data. Combined with the batching defect, this means that in the reference
+implementation co-expression messages reach about 12\% of genes, and only for 1 of 32 cells per mini-batch.
+
+\subsection{The learned graph is informative}
+\LASSER{} produces about 45k edges per split (44,610--45,192). Every gene gets in-degree $\ge 5$ (median 7, max
+25), and neighbourhood Jaccard overlap with $A_0$ is 0.03.
+\begin{itemize}
+  \item \emph{Link prediction}: the pretrained encoders reach a held-out link AUC of 0.973--0.997, vs.\
+        0.956--0.979 for the raw view features.
+  \item \emph{Held-out co-expression}: 3.4--3.7\% of new edges have $|r|>0.2$ on the held-out half $H_2$, vs.\
+        0.1--0.2\% for degree-matched random pairs (about 18-fold enrichment) and 58--66\% for $A_0$ edges
+        (Fig.~\ref{fig:graphs}b). The new edges are weaker than $A_0$'s, as intended, since most connect previously
+        isolated genes.
+  \item \emph{Stability}: 346 new pairs appear in all three splits, although the training perturbations differ
+        between splits. They form biologically coherent modules (Table~\ref{tab:consensus}), including mitosis and
+        chromosome segregation (\textit{CDCA8}, \textit{CENPA}, \textit{AURKA}, \textit{PLK1}, \textit{TPX2},
+        \textit{CDK1}, \textit{NUSAP1}, \textit{MKI67}, \textit{BIRC5}, \textit{CKS2}), the proteasome
+        (\textit{PSMA4}, \textit{PSMB1--3}, \textit{UBB}), nucleolar and ribosome biogenesis (\textit{NCL},
+        \textit{DDX21}, \textit{SRM}, \textit{HSPD1}) and haematopoietic adhesion (\textit{ITGB2}, \textit{CD84},
+        \textit{MYO1F}).
+  \item \emph{Beyond Pearson}: 44.5\% of the consensus pairs are also in the density-matched Pearson graph of
+        split 1, so the learner recovers correlation structure and adds pairs that pairwise correlation ranks
+        lower.
+\end{itemize}
+
+\subsection{Study 1: with upstream GEARS, the graph does not change predictions}
+On the splits where both arms were run, \GEARS{} and \LASSER{} give Pearson~$\Delta$ of 0.524 vs.\ 0.523
+(split~2) and 0.547 vs.\ 0.551 (split~3). Per perturbation (226 pairs), the mean improvement is $+0.002$, 95\% CI
+$[-0.003, 0.006]$, with 54\% of perturbations improved. This is what the batching defect predicts.
+
+\subsection{Study 2: with the fix, graph structure still does not matter}
+Table~\ref{tab:main} and Fig.~\ref{fig:headline} summarise the batching-fix study. All graph variants are well above
+the additive baseline in Pearson~$\Delta$ (0.53 vs.\ 0.41) and in top-20 DE MSE (0.22 vs.\ 0.27), and they are
+indistinguishable from each other:
+\begin{itemize}
+  \item \textbf{Learned vs.\ original Pearson.} \LASSER-fix minus \GEARS-fix: Pearson~$\Delta$ $-0.013$
+        $[-0.052, 0.027]$, 0/3 splits better; top-20 DE MSE $-0.002$ $[-0.027, 0.023]$ (positive = better).
+        Per perturbation (333 pairs): $-0.012$, bootstrap 95\% CI $[-0.029, 0.001]$, 43\% improved. If anything,
+        the learned graph is slightly worse, and the effect is small (Fig.~\ref{fig:perpert}).
+  \item \textbf{Learned vs.\ random partners.} \LASSER-fix minus \LASSER-random-fix: Pearson~$\Delta$ $+0.002$
+        $[-0.081, 0.084]$; per perturbation $+0.001$ $[-0.028, 0.035]$. Keeping the degrees and weights but
+        destroying \emph{which} genes are connected changes nothing measurable.
+  \item \textbf{Density-matched Pearson} (split 1 only): \LASSER-fix $0.535$ vs.\ \GEARS-kNN8-fix $0.509$, with
+        near-identical MSE.
+  \item \textbf{Subgroups} (Fig.~\ref{fig:subgroups}): no subgroup shows a consistent gain. Combinations with both
+        genes seen have the largest point estimate in favour of learned over random partners (+0.019 Pearson~$\Delta$
+        per perturbation, 65\% improved), but its CI includes zero.
+  \item \textbf{Gene groups} (Fig.~\ref{fig:genegroups}): if a denser graph helped, the 4.4k genes isolated in
+        $A_0$, whose neighbourhoods change most, should gain. They do not ($-0.015 \pm 0.021$ Pearson~$\Delta$ over
+        splits).
+\end{itemize}
+
+\subsection{Run-to-run variability exceeds the graph effect}
+Two runs of the same \LASSER{} configuration on split~1, in separate sessions, gave Pearson~$\Delta$ of 0.574 and
+0.491. The graphs differed by 0.2\% of edges because of a numerical change, and GPU kernels were not
+deterministic. Within study 2, the spread across all graph variants on a split was 0.067, 0.002 and 0.030 for
+splits 1--3. Single-split comparisons of graph priors in \GEARS{} are therefore unreliable; the +0.04 gain we saw
+in an early single-split run did not replicate.
+
+% =====================================================================================
+\section{Why the graph cannot matter much in GEARS}
+Equation~\ref{eq:gears} makes the reason explicit. With the batching fix, the co-expression path contributes
+$Q = \mathrm{SGConv}_A(P) = \hat{A} P \Theta + b$ to every cell, where $P$ is a free learnable table and
+$\hat{A}$ is the normalised adjacency with self-loops. $Q$ depends neither on the cell's expression nor on the
+perturbation. Whenever $\hat{A}$ is invertible (with self-loops this is the generic case), any target $Q$ is
+reachable by choosing $P = \hat{A}^{-1}(Q-b)\Theta^{+}$, for every graph. The graph therefore changes only the
+parameterisation of a per-gene bias, i.e.\ the optimisation path and the implicit regularisation (max-norm
+embeddings, weight decay), not what the model can express. Our controls are consistent with this: original, dense,
+learned and random graphs end up equivalent. Without the fix, the first cell of each batch gets
+$\hat{A}P\Theta+b$ and the others $P\Theta+b$, which is still cell-independent.
+
+More broadly, the predicted change in \GEARS{} is computed from the perturbation and learnable per-gene parameters.
+The control cell's expression is added at the end as a residual, apart from batch-norm statistics during training.
+Gene--gene priors over output genes can only add information if messages carry cell- or perturbation-specific
+signals: for example, propagating the perturbation's effect or the cell's state over the graph. This also explains
+why task-driven graph learning (IDGL-style) and hyperbolic GO embeddings, which we tried earlier, did not help
+either.
+
+% =====================================================================================
+\section{Recommendations}
+\begin{enumerate}
+  \item \textbf{Check that the prior can act.} Before learning a graph, verify that it reaches the computation
+        (here, the batching defect) and that its input is not a free, cell-independent table (here, the
+        re-parameterisation argument).
+  \item \textbf{Always include structure-destroying controls.} A degree- and weight-preserving random rewiring and a
+        density-matched simple graph separate ``learned structure helps'' from ``more edges help'' and from noise.
+  \item \textbf{Report variability and pair the comparisons.} Use several splits and training seeds, pair arms
+        within split and seed, and report effect sizes with CIs and per-perturbation analyses rather than single
+        runs.
+  \item \textbf{Report the reference baselines.} Include the additive and no-perturbation baselines scored with the
+        same code, and interpret direction metrics with care for baselines that predict zero change.
+\end{enumerate}
+
+% =====================================================================================
+\section{Limitations}
+\begin{itemize}
+  \item One dataset (Norman K562).
+  \item Three splits in the main study, 10 epochs per run (chosen to fit the compute budget; validation DE-MSE
+        usually peaks early), and only one split for the density-matched control.
+  \item Run-to-run variability was estimated across sessions rather than from planned training-seed replicates.
+  \item Planned ablations (single views, add-only refinement, embedding initialisation from pretrained views,
+        edit sizes) were not run. Given the re-parameterisation argument, we do not expect them to change the
+        conclusion for \GEARS{}, but they would matter for architectures where the graph acts on cell-specific
+        signals.
+  \item External validation of consensus edges (e.g.\ STRING, TRRUST) is left to future work.
+\end{itemize}
+
+\section{Conclusion}
+In \GEARS{}, the gene co-expression graph is a nearly empty prior, reaches only one cell per mini-batch, and, even
+when fixed, cannot change what the model can express. A self-supervised learned graph captures real and stable
+co-expression structure, but neither it, nor a density-matched Pearson graph, nor a random rewiring changes
+predictions beyond run-to-run noise. Improving graph priors for perturbation prediction will require architectures
+in which graph messages carry cell- or perturbation-specific information, evaluated against structure-destroying
+controls.
+
+\paragraph{Code and data availability.} Code, tests, run configurations and per-run outputs:
+\todo{repository URL}. The harness reproduces upstream \GEARS{} exactly when graph learning and the fix are off.
+
+% =====================================================================================
+\begin{table}[t]
+\centering
+\caption{Study 2 (batching fix, 10 epochs): test metrics, mean $\pm$ sd over splits 1--3 (GEARS-kNN8-fix: split 1
+only). Pearson~$\Delta$: higher is better; MSE, nMSE and opposite direction: lower is better. nMSE = top-20 DE MSE
+divided by the no-perturbation MSE (ratio of means). $^\dagger$Baselines that predict zero change for some genes
+have a trivially low opposite-direction fraction.}
+\label{tab:main}
+\small
+\begin{tabular}{lccccc}
+\toprule
+ & Pearson $\Delta$ & Pearson $\Delta$ (top-20 DE) & MSE (top-20 DE) & nMSE & Opposite dir.\\
+\midrule
+No-perturbation & 0.000 & 0.000 & $0.469\pm0.043$ & 1.000 & $0.000^\dagger$\\
+Additive & $0.407\pm0.024$ & $0.448\pm0.022$ & $0.268\pm0.033$ & $0.570\pm0.025$ & $0.083\pm0.010^\dagger$\\
+\midrule
+GEARS-fix (Pearson $A_0$) & $0.540\pm0.023$ & $0.670\pm0.017$ & $0.218\pm0.040$ & $0.462\pm0.042$ & $0.350\pm0.011$\\
+LASSER-fix (learned) & $0.527\pm0.008$ & $0.671\pm0.023$ & $0.220\pm0.032$ & $0.467\pm0.025$ & $0.347\pm0.011$\\
+LASSER-random-fix & $0.526\pm0.029$ & $0.657\pm0.017$ & $0.221\pm0.034$ & $0.471\pm0.034$ & $0.346\pm0.006$\\
+GEARS-kNN8-fix (1 split) & 0.509 & 0.672 & 0.192 & 0.439 & 0.369\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Paired differences (arm minus reference, oriented so that $>0$ is better), study 2.
+Splits: mean over splits with a $t$-based 95\% CI and the number of splits improved.
+Perturbations: mean over (split, perturbation) pairs with a 95\% bootstrap CI that resamples splits.}
+\label{tab:paired}
+\small
+\begin{tabular}{llccc}
+\toprule
+Comparison & Metric & Over splits & Splits better & Over perturbations\\
+\midrule
+LASSER-fix vs GEARS-fix & Pearson $\Delta$ & $-0.013\;[-0.052, 0.027]$ & 0/3 & $-0.012\;[-0.029, 0.001]$\\
+ & MSE (top-20 DE) & $-0.002\;[-0.027, 0.023]$ & 1/3 & $-0.002\;[-0.012, 0.009]$\\
+ & Opposite direction & $+0.002\;[-0.019, 0.024]$ & 2/3 & $+0.002\;[-0.008, 0.013]$\\
+LASSER-fix vs LASSER-random-fix & Pearson $\Delta$ & $+0.002\;[-0.081, 0.084]$ & 1/3 & $+0.001\;[-0.028, 0.035]$\\
+ & MSE (top-20 DE) & $+0.002\;[-0.034, 0.037]$ & 2/3 & $+0.002\;[-0.013, 0.014]$\\
+ & Opposite direction & $-0.002\;[-0.013, 0.009]$ & 1/3 & $-0.002\;[-0.010, 0.006]$\\
+LASSER-fix vs GEARS-kNN8-fix & Pearson $\Delta$ & $+0.026$ (1 split) & 1/1 & $+0.026\;[0.013, 0.041]$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{The 12 highest-scoring learned edges present in all three splits (346 such pairs in total; full list in
+\texttt{consensus\_edges\_split1-3.csv}). ``kNN8'': the pair is also in the density-matched Pearson graph of split 1.}
+\label{tab:consensus}
+\small
+\begin{tabular}{llcl}
+\toprule
+Gene & Gene & kNN8 & Module\\
+\midrule
+CDCA8 & CENPA & yes & mitosis / chromosome segregation\\
+CENPA & AURKA & yes & mitosis\\
+CKS2 & BIRC5 & yes & mitosis / cell cycle\\
+PLK1 & TPX2 & yes & mitotic spindle\\
+PSMB2 & PSMB3 & yes & proteasome\\
+SRM & NCL & yes & nucleolus / growth\\
+PSMB2 & PSMA4 & yes & proteasome\\
+MYO1F & ITGB2 & no & haematopoietic adhesion\\
+ENO1 & HSPD1 & yes & metabolism / chaperone\\
+HSPD1 & DDX21 & yes & nucleolus / ribosome biogenesis\\
+CDK1 & NUSAP1 & yes & mitosis\\
+CD84 & ITGB2 & no & haematopoietic adhesion\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig1_headline_overall.pdf}
+\caption{Study 2: test metrics per arm. Dots: splits; marker: mean $\pm$ 95\% CI; grey lines join arms within a
+split. All graph variants are similar and clearly above the reference baselines in Pearson~$\Delta$ and MSE.}
+\label{fig:headline}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig_forest_fix.pdf}
+\caption{Paired improvement over splits (oriented so that $>0$ is better), with 95\% CI and the number of splits
+improved. Every interval includes zero.}
+\label{fig:forest}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig2_subgroups_pearson_delta.pdf}
+\caption{Pearson~$\Delta$ per test subgroup. No subgroup shows a consistent gain from the learned graph.}
+\label{fig:subgroups}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig3_per_perturbation_pearson_delta.pdf}
+\caption{Per-perturbation Pearson~$\Delta$, LASSER-fix vs.\ GEARS-fix, pooled over splits. Points scatter around
+the diagonal.}
+\label{fig:perpert}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig4_gene_groups.pdf}
+\caption{Change relative to GEARS-fix on output genes isolated in vs.\ connected in $A_0$. The isolated genes, whose
+neighbourhoods change most, do not gain.}
+\label{fig:genegroups}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig6_graphs.pdf}
+\caption{(a) In-degree distribution on split 1 for the GEARS Pearson graph ($A_0$), the density-matched Pearson
+graph and the learned graph. (b) Share of edges with $|r|>0.2$ in held-out cells ($H_2$): $A_0$ edges, learned new
+edges and degree-matched random pairs (mean $\pm$ sd over splits).}
+\label{fig:graphs}
+\end{figure}
+
+\clearpage
+\bibliographystyle{unsrtnat}
+\bibliography{refs}
+\end{document}
