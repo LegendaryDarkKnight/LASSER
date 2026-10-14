@@ -116,7 +116,8 @@ def _version(pkg: str) -> Optional[str]:
         return None
 
 
-_TEXT_COLUMNS = {"run_id": str, "config_hash": str, "split_hash": str, "gsr_cache_key": str, "run_tag": str}
+_TEXT_COLUMNS = {"run_id": str, "config_hash": str, "split_hash": str, "gsr_cache_key": str, "run_tag": str,
+                 "graph_cache_key": str}
 
 
 def read_runs_csv(path: str) -> pd.DataFrame:
@@ -204,6 +205,7 @@ class RunTracker:
         d = self.cfg.to_dict()
         d["config_hash"] = self.config_hash
         d["gsr_cache_key"] = self.cfg.gsr_cache_key() if self.cfg.graph_learning else None
+        d["graph_cache_key"] = self.cfg.graph_cache_key()
         d["run_id"] = self.run_id
         write_json(self.path("config.json"), d)
 

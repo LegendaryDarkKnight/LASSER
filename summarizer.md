@@ -12,6 +12,19 @@ Read this at the start of a new session. It records what has been built, what wa
   4. **Mechanism:** the co-expression GNN smooths a free learnable table (`emb_pos`) that is independent of the cell's expression, so any graph only re-parameterises per-gene biases. In GEARS, `x` enters only as the final residual. The user's earlier IDGL and Poincaré attempts also gave no gains, which is consistent with this.
 - **Open:** see the to-do list in `paper/README.md` (authors, earlier-attempt details, citation checks, the Figure 1 title overlap, and optional strengthening runs).
 
+## VAE line of work (2026-10-14)
+
+- **User decision:** build a VAE-based graph learner (my recommendation: a cell-level linear-decoder VAE) and make the graph act on cell-specific signal (option B: the cell-signal variant). **Earlier code must keep working.**
+- **Implemented:**
+  - `LasserConfig.graph_mode` ("gsr" default | "vae") and `VAEConfig`;
+  - `lasser/vae.py` (LinearVAE, `gene_embeddings` with the load/denoise/resp similarities as exact cosine identities, posterior-sampling `edge_confidence`, `run_vae_pipeline`, `VAECoexpressProvider` subclassing the GSR provider through new `_source`/`_pipeline` hooks);
+  - `LasserConfig.cell_signal` with `lasser/cellsignal.py`;
+  - `study.VAE_PLAN` with arms GEARS-cs, VAE-cs, VAE-random-cs, GEARS-kNN8-cs, LASSER-cs and VAE-fix;
+  - `notebooks/lasser_vae_study.ipynb`;
+  - `tests/test_08_vae.py`, plus a VAE leakage test in `tests/test_03_leakage.py`.
+- **Compatibility:** the new fields are excluded from `config_hash` at their defaults; `gsr` is dropped from the hash only for VAE runs and `vae` only for non-VAE runs, so earlier runs keep their hashes and GSR cache keys. The `runs.csv` gsr_* columns are unchanged for GSR runs; new generic columns are `graph_mode`, `cell_signal`, `graph_cache_key`, `graph_h2_hit_*` and `vae_*`.
+- **Status:** only syntax-checked locally (static import audit OK). **Next:** the user pushes and runs `lasser_vae_study.ipynb` on Kaggle. Cell 4 (fast tests including test_08) must pass first.
+
 ## Kaggle run log
 
 **Run 01 (2026-10-06, `notebooks/run_lasser_01.ipynb`, Kaggle Python 3.13, commit `ab75303`).** All tests except the `eval.py` hash check failed or errored. There were two root causes, both now fixed:

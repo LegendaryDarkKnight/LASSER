@@ -77,6 +77,8 @@ Seeding: `seed_everything(seed)` runs at the start and again right before `GEARS
 | `subsample_cells_per_condition` | `None` | **Tests only**: keep the first n cells of each condition in the dataloaders |
 | `uncertainty` | `False` | Must stay `False`: `eval.py` expects point predictions |
 | `fix_coexpress_batching` | `False` | Opt-in fix: every cell in a batch gets co-expression messages (upstream GEARS: only the first). See below |
+| `graph_mode` | `"gsr"` | Graph learner used when `graph_learning=True`: `"gsr"` (LASSER-GSR, unchanged default) or `"vae"` (see below) |
+| `cell_signal` | `False` | Opt-in GEARS variant (needs `fix_coexpress_batching`): each cell's control expression feeds the co-expression GNN, so graph messages are cell-specific |
 | `train_seed` | `None` | RNG seed for model initialisation and batch order; `None` = `seed`. For training-seed replicates on one split; the learned graph doesn't depend on it |
 
 ### `GSRConfig` (nested as `cfg.gsr`)
@@ -147,6 +149,57 @@ The graph pickle is a dict with these keys: `edge_index`, `edge_weight` (numpy),
 The device (`cuda:0 (<GPU name>, <memory>)` or `cpu`) is logged before anything runs, again when GSR and training start, and stored in `runs.csv` (`device`) and `env.json`. The GEARS checkpoint is written straight after training, before metrics are parsed or computed.
 
 `epoch_log.csv` is parsed from GEARS's printout, because its training loop reports nothing else. So the train loss column is the mean of the losses GEARS prints every 50 steps.
+
+## VAE graph learning and the cell-signal variant
+
+**Why.** In GEARS the co-expression GNN smooths a learnable table that is the same for every cell, so any graph only
+re-parameterises per-gene biases (`paper/main.tex`, Section 5). This line of work changes both the graph learner and
+where the graph acts.
+
+**`graph_mode="vae"` (`lasser/vae.py`, settings in `VAEConfig`, nested as `cfg.vae`).**
+- **Model:** a cell-level VAE with a linear decoder (`x ≈ W z + b`, Gaussian likelihood with a per-gene variance),
+  trained on half H1 of the training cells. A small part of H1 is held out for early stopping.
+- **Gene embeddings:** decoder loadings `W_g`.
+- **Similarities** (all cosines of linear transforms of `W_g`, so no N×N matrix is formed):
+  - `load`: cosine of loadings;
+  - `denoise`: correlation of the VAE's reconstructed expression (`cos(L^T W_g, L^T W_h)`, with `cov(z) = L L^T`);
+  - `resp`: correlation of decoded changes across training perturbations.
+- **Score and graph:** the combined score is `sum beta_s * minmax(cos_s)`, and the graph is refined from A0 with the
+  LASSER-GSR rules (`refine_graph`).
+- **Edge confidence:** the share of `n_posterior_samples` posterior samples in which an edge stays in an endpoint's
+  top `confidence_k`. New-edge weights are multiplied by `max(confidence, confidence_floor)`.
+- **Control:** `vae.edge_control="random"` rewires the new edges, as for GSR.
+- **Checks:** held-out H2 reconstruction R², active latent dimensions and edge confidence, in `checks.json["vae"]`
+  and `runs.csv` (`vae_*`).
+- **Caching:** under `cache_dir/vae/...`, keyed by `vae_cache_key()`. The checkpoint is `checkpoints/vae_model.pt`.
+
+| `VAEConfig` group | Fields (default) |
+|---|---|
+| Model | `latent_dim` 24, `hidden_dim` 256 |
+| Training | `epochs` 40, `batch_size` 512, `lr` 1e-3, `weight_decay` 0, `kl_weight` 1, `kl_warmup_epochs` 10, `max_cells` 60000, `val_frac` 0.05, `patience` 8 |
+| Similarities | `similarities` (load, denoise, resp), `beta` {load 0.3, denoise 0.4, resp 0.3} |
+| Confidence | `n_posterior_samples` 10, `confidence_k` 10, `confidence_weighting` True, `confidence_floor` 0.1 |
+| Refinement | `r_minus` 0.1, `m_plus` 5, `d_min` 5, `gamma` 0.5, `score_floor` 0, `cand_topk` 100, `chunk_size` 512, `edge_control` None |
+| Checks | `h2_hit_threshold` 0.2, `pos_max_cells` 20000, `collapse_sample` 2000 |
+
+**`cell_signal=True` (`lasser/cellsignal.py`; needs `fix_coexpress_batching=True`).**
+- The co-expression SGConv input becomes `emb_pos[g] + x[cell, g]·u + c`. Here `x` is the cell's control
+  expression, and `u, c` are learned and start near zero.
+- So a gene's embedding depends on its neighbours' expression in that cell.
+- It's wired by class swaps (`CellSignalGEARSModel`, `CellSignalSGConv`): GEARS's vendored code is untouched.
+- `u` is initialised from a private generator, so batch order matches the paired runs without the variant.
+
+**Compatibility.** With `graph_mode="gsr"` and `cell_signal=False` (the defaults), nothing changes. Earlier config
+hashes, GSR cache keys and studies stay valid; `tests/test_08_vae.py` checks this.
+
+**`notebooks/lasser_vae_study.ipynb`** (`lasser.study.VAE_PLAN`, 10 epochs, about 10 runs per 10-hour session):
+1. `GEARS-cs` vs `VAE-cs`, splits 1–3
+2. `VAE-random-cs`
+3. `GEARS-kNN8-cs`
+4. `LASSER-cs` (GSR graph, same variant)
+5. `VAE-fix` (VAE graph in GEARS's original slot)
+6. training-seed replicates
+7. splits 4–5
 
 ## The batching fix and the option-1 study
 
@@ -233,6 +286,7 @@ It then calls `evaluate_streaming` and `paper_summary` on GEARS's `best_model`.
 | `test_05_parsing.py` | GEARS printout parsing on real lines (no data needed) |
 | `test_06_study.py` | Synthetic data, no dataset: random-edge control keeps in-degrees and weights; job table; analysis functions; figures render |
 | `test_07_fix.py` | Synthetic: batched SGConv equals per-cell SGConv (and upstream differs); new config fields keep old hashes; fix plan; replicate parsing |
+| `test_08_vae.py` | Synthetic: the VAE recovers planted modules; the similarity formulas equal explicit correlations; edge confidence; upstream GEARS's predicted change is cell-independent while the cell-signal variant's is not; config/hash compatibility; the VAE plan. `test_03_leakage.py` also checks the VAE graph against held-out-cell changes |
 | `test_09_smoke.py` | 9: full Norman, 1 epoch, flag off and on, peak memory < 15 GB, GSR < 4 GB (`LASSER_SMOKE=1`) |
 
 Environment variables: `LASSER_DATA_DIR`, `LASSER_TEST_DIR`, `LASSER_SUBSAMPLE` (default 4 cells per condition), `LASSER_SMOKE`.

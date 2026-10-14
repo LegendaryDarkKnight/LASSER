@@ -12,7 +12,8 @@ from typing import Any, Dict, Optional, Tuple
 GSR_CACHE_VERSION = 2  # 2: canonical CSR input (run 02)
 
 # Fields that say *where* or *how loudly* a run happens, not *what* it computes.
-_LATER_DEFAULTS = {"fix_coexpress_batching": False, "train_seed": None}
+VAE_CACHE_VERSION = 1
+_LATER_DEFAULTS = {"fix_coexpress_batching": False, "train_seed": None, "graph_mode": "gsr", "cell_signal": False}
 _NON_SEMANTIC = {"data_dir", "out_dir", "cache_dir", "log_level", "repo_dir", "device", "run_tag"}
 
 
@@ -123,6 +124,72 @@ class GSRConfig:
 
 
 @dataclass
+class VAEConfig:
+    """VAE-based co-expression graph learning (``graph_mode="vae"``).
+
+    A cell-level VAE with a linear decoder is trained on half H1 of the training cells. Its
+    decoder loadings are gene embeddings; gene-gene similarities are cosines of linear
+    transforms of them (see ``lasser/vae.py``). The graph is then refined from A0 exactly
+    like LASSER-GSR (same remove/add/top-up/weight rules).
+    """
+
+    # Model
+    latent_dim: int = 24
+    hidden_dim: int = 256
+    # Training (half H1 of the training cells; a small part of H1 for early stopping)
+    epochs: int = 40
+    batch_size: int = 512
+    lr: float = 1e-3
+    weight_decay: float = 0.0
+    kl_weight: float = 1.0
+    kl_warmup_epochs: int = 10
+    max_cells: int = 60000
+    val_frac: float = 0.05
+    patience: int = 8                  # epochs without validation improvement
+
+    # Similarities (each a cosine of gene embeddings) and their weights
+    similarities: Tuple[str, ...] = ("load", "denoise", "resp")
+    beta: Dict[str, float] = field(default_factory=lambda: {"load": 0.3, "denoise": 0.4, "resp": 0.3})
+    # Edge confidence from posterior sampling
+    n_posterior_samples: int = 10
+    confidence_k: int = 10             # an edge is confirmed in a sample if it is in the target's top-k
+    confidence_weighting: bool = True  # new-edge weight *= max(confidence, confidence_floor)
+    confidence_floor: float = 0.1
+
+    # Refinement (same meaning as GSRConfig)
+    r_minus: float = 0.1
+    m_plus: int = 5
+    d_min: int = 5
+    gamma: float = 0.5
+    score_floor: float = 0.0
+    cand_topk: int = 100
+    chunk_size: int = 512
+    edge_control: Optional[str] = None  # "random": rewire new edges (control)
+
+    # Checks
+    h2_hit_threshold: float = 0.2
+    pos_max_cells: int = 20000
+    collapse_sample: int = 2000
+
+    def validate(self) -> None:
+        unknown = set(self.similarities) - {"load", "denoise", "resp"}
+        if unknown:
+            raise ValueError(f"unknown VAE similarities {sorted(unknown)}")
+        missing = [s for s in self.similarities if s not in self.beta]
+        if missing:
+            raise ValueError(f"vae.beta has no weight for {missing}")
+        total = sum(self.beta[s] for s in self.similarities)
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(f"vae.beta over the active similarities must sum to 1, got {total}")
+        if self.edge_control not in (None, "random"):
+            raise ValueError("vae.edge_control must be None or 'random'")
+        if not 0 <= self.r_minus < 1 or self.m_plus < 0 or self.d_min < 0:
+            raise ValueError("invalid vae refinement settings")
+        if self.latent_dim < 2:
+            raise ValueError("vae.latent_dim must be >= 2")
+
+
+@dataclass
 class LasserConfig:
     """Everything a run needs. Defaults are GEARS's defaults and Kaggle paths."""
 
@@ -160,6 +227,11 @@ class LasserConfig:
     # RNG seed for model init / batch order; None = ``seed`` (the split seed). Lets several
     # training runs share one split.
     train_seed: Optional[int] = None
+    # Which graph learner graph_learning=True uses: "gsr" (LASSER-GSR, default) or "vae".
+    graph_mode: str = "gsr"
+    # Opt-in GEARS variant (needs fix_coexpress_batching): each cell's control expression is
+    # fed into the co-expression GNN, so graph messages are cell-specific (lasser/cellsignal.py).
+    cell_signal: bool = False
 
     # Runtime
     device: str = "cuda"
@@ -173,16 +245,26 @@ class LasserConfig:
     subsample_cells_per_condition: Optional[int] = None
 
     gsr: GSRConfig = field(default_factory=GSRConfig)
+    vae: VAEConfig = field(default_factory=VAEConfig)
 
     def validate(self) -> None:
         if self.gsr_init_gene_emb and not self.graph_learning:
             raise ValueError("gsr_init_gene_emb needs graph_learning=True")
         if self.uncertainty:
             raise ValueError("uncertainty mode is not supported: eval.py expects point predictions")
+        if self.graph_mode not in ("gsr", "vae"):
+            raise ValueError("graph_mode must be 'gsr' or 'vae'")
         if self.graph_learning:
-            self.gsr.validate()
+            if self.graph_mode == "gsr":
+                self.gsr.validate()
+            else:
+                self.vae.validate()
+        if self.gsr_init_gene_emb and self.graph_mode != "gsr":
+            raise ValueError("gsr_init_gene_emb needs graph_mode='gsr'")
         if self.gsr_init_gene_emb and "E" not in self.gsr.views:
             raise ValueError("gsr_init_gene_emb uses the E view; add 'E' to gsr.views")
+        if self.cell_signal and not self.fix_coexpress_batching:
+            raise ValueError("cell_signal needs fix_coexpress_batching=True (cell features need a per-cell graph)")
 
     def gears_model_kwargs(self) -> Dict[str, Any]:
         """Arguments for ``GEARS.model_initialize`` (graphs excluded)."""
@@ -208,12 +290,17 @@ class LasserConfig:
         g = dict(d.pop("gsr", {}) or {})
         if "views" in g:
             g["views"] = tuple(g["views"])
-        return cls(**d, gsr=GSRConfig(**g))
+        v = dict(d.pop("vae", {}) or {})
+        if "similarities" in v:
+            v["similarities"] = tuple(v["similarities"])
+        return cls(**d, gsr=GSRConfig(**g), vae=VAEConfig(**v))
 
     def config_hash(self) -> str:
         d = {k: v for k, v in self.to_dict().items() if k not in _NON_SEMANTIC}
-        if not self.graph_learning:
-            d.pop("gsr")  # GSR settings don't affect a baseline run
+        if not self.graph_learning or self.graph_mode != "gsr":
+            d.pop("gsr")  # GSR settings only matter for a GSR graph
+        if not self.graph_learning or self.graph_mode != "vae":
+            d.pop("vae")  # VAE settings only matter for a VAE graph
         # Fields added later are left out at their defaults, so earlier runs keep their hash.
         for k, default in _LATER_DEFAULTS.items():
             if d.get(k) == default:
@@ -236,6 +323,24 @@ class LasserConfig:
             "num_similar_genes_co_express_graph": self.num_similar_genes_co_express_graph,
             "gsr": dataclasses.asdict(self.gsr),
         })
+
+    def vae_cache_key(self) -> str:
+        """Everything the VAE graph depends on."""
+        return stable_hash({
+            "version": VAE_CACHE_VERSION,
+            "dataset": self.dataset,
+            "split": self.split,
+            "seed": self.seed,
+            "train_gene_set_size": self.train_gene_set_size,
+            "coexpress_threshold": self.coexpress_threshold,
+            "num_similar_genes_co_express_graph": self.num_similar_genes_co_express_graph,
+            "vae": dataclasses.asdict(self.vae),
+        })
+
+    def graph_cache_key(self) -> Optional[str]:
+        if not self.graph_learning:
+            return None
+        return self.gsr_cache_key() if self.graph_mode == "gsr" else self.vae_cache_key()
 
 
 def stable_hash(obj: Any, n: int = 12) -> str:

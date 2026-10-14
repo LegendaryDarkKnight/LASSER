@@ -24,6 +24,18 @@ FIX_ARM_COLORS: Dict[str, str] = {"GEARS": "#e87ba4", "GEARS-fix": "#2a78d6", "L
                                   "GEARS-kNN8-fix": "#1baf7a", "LASSER-random-fix": "#eda100"}
 
 
+# VAE study: the five arms that share a panel keep validated slots 1-5 (display order below).
+VAE_ARM_COLORS: Dict[str, str] = {"GEARS-cs": "#2a78d6", "VAE-cs": "#eb6834", "GEARS-kNN8-cs": "#1baf7a",
+                                  "VAE-random-cs": "#eda100", "LASSER-cs": "#e87ba4", "VAE-fix": "#008300"}
+
+
+def use_vae_colors() -> None:
+    """Switch the arm colours to the VAE study (order GEARS-cs, VAE-cs, GEARS-kNN8-cs, VAE-random-cs,
+    LASSER-cs, VAE-fix)."""
+    ARM_COLORS.clear()
+    ARM_COLORS.update(VAE_ARM_COLORS)
+
+
 def use_fix_colors() -> None:
     """Switch the arm colours to the option-1 (batching-fix) study."""
     ARM_COLORS.clear()

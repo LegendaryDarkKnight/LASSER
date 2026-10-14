@@ -81,3 +81,31 @@ def test_heldout_cells_do_not_change_graph(pert_data):
     assert torch.equal(g1.edge_index, g2.edge_index), "refined graph edges changed"
     assert torch.equal(g1.edge_weight, g2.edge_weight), "refined graph weights changed"
     print("views, positives, embeddings and refined graph identical;", g1.checks["refine"])
+
+
+def test_heldout_cells_do_not_change_vae_graph(pert_data):
+    """Same check for graph_mode="vae": the VAE, its gene embeddings and the graph see no held-out cell."""
+    from lasser.config import VAEConfig
+    from lasser.graph import CoexpressGraph
+    from lasser.vae import run_vae_pipeline
+
+    vcfg = VAEConfig(epochs=3, kl_warmup_epochs=1, patience=5, max_cells=3000, n_posterior_samples=2,
+                     pos_max_cells=3000)
+    cfg = make_cfg(device="cpu", graph_learning=True, graph_mode="vae", vae=vcfg)
+    pert_data.prepare_split(split=cfg.split, seed=cfg.seed, train_gene_set_size=cfg.train_gene_set_size)
+    pert_data.get_dataloader(batch_size=cfg.batch_size, test_batch_size=cfg.test_batch_size)
+    shuffled, n_rows = _perturb_heldout(pert_data.adata, pert_data.set2conditions)
+    _, a0_net = _a0(pert_data.adata, pert_data, cfg, "orig_vae")
+    a0 = CoexpressGraph(a0_net.edge_index, a0_net.edge_weight, "gears_static")
+    genes = pert_data.gene_names.values.tolist()
+
+    graphs = []
+    for adata in (pert_data.adata, shuffled):
+        seed_everything(cfg.seed, deterministic=True)
+        graphs.append(run_vae_pipeline(adata, pert_data.set2conditions, a0, genes, cfg, torch.device("cpu")))
+    g1, g2 = graphs
+    for k in g1.embeddings:
+        assert torch.equal(g1.embeddings[k], g2.embeddings[k]), f"VAE embedding {k} changed"
+    assert torch.equal(g1.edge_index, g2.edge_index), "VAE graph edges changed"
+    assert torch.equal(g1.edge_weight, g2.edge_weight), "VAE graph weights changed"
+    print(f"perturbed {n_rows} held-out cells; VAE graph identical;", g1.checks["vae"])

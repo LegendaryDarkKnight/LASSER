@@ -111,9 +111,14 @@ def run_gsr_pipeline(adata, set2conditions, a0: CoexpressGraph, gene_list, cfg: 
 
 
 class GSRCoexpressProvider:
-    """GSR-refined co-expression graph, computed once per cache key."""
+    """GSR-refined co-expression graph, computed once per cache key.
+
+    Subclasses (e.g. ``lasser.vae.VAECoexpressProvider``) reuse the cache by overriding
+    ``__init__`` (key and folder), ``_source`` and ``_pipeline``.
+    """
 
     FILES = ("graph.pt", "extras.pt", "edits.csv", "checks.json", "meta.json")
+    LABEL = "GSR"
 
     def __init__(self, cfg: LasserConfig):
         self.cfg = cfg
@@ -159,11 +164,18 @@ class GSRCoexpressProvider:
         with open(os.path.join(self.cache_path, "checks.json")) as f:
             checks = json.load(f)
         a0 = CoexpressGraph(d["a0_edge_index"], d["a0_edge_weight"], "gears_static")
-        source = "gsr_random_control" if self.cfg.gsr.edge_control == "random" else "gsr_refined"
-        return CoexpressGraph(d["edge_index"], d["edge_weight"], source, a0=a0,
+        return CoexpressGraph(d["edge_index"], d["edge_weight"], self._source(), a0=a0,
                               edits=pd.read_csv(os.path.join(self.cache_path, "edits.csv")),
                               checks=checks, embeddings=x["embeddings"], encoder_state=x["encoder_state"],
                               info=x["info"])
+
+    def _source(self) -> str:
+        return "gsr_random_control" if self.cfg.gsr.edge_control == "random" else "gsr_refined"
+
+    def _pipeline(self, pert_data, a0: CoexpressGraph, device: torch.device,
+                  timings: Optional[Dict[str, Any]]) -> CoexpressGraph:
+        gene_list = pert_data.gene_names.values.tolist()
+        return run_gsr_pipeline(pert_data.adata, pert_data.set2conditions, a0, gene_list, self.cfg, device, timings)
 
     def build(self, pert_data, device: torch.device, timings: Optional[Dict[str, Any]] = None) -> CoexpressGraph:
         a0 = StaticCoexpressProvider(self.cfg).build(pert_data)
@@ -172,10 +184,9 @@ class GSRCoexpressProvider:
             if not (torch.equal(g.a0.edge_index, a0.edge_index) and torch.equal(g.a0.edge_weight, a0.edge_weight)):
                 raise RuntimeError(f"cached A0 in {self.cache_path} differs from GEARS's A0; delete the cache")
             self.from_cache = True
-            logger.info("GSR graph loaded from cache %s", self.cache_path)
+            logger.info("%s graph loaded from cache %s", self.LABEL, self.cache_path)
             return g
-        gene_list = pert_data.gene_names.values.tolist()
-        g = run_gsr_pipeline(pert_data.adata, pert_data.set2conditions, a0, gene_list, self.cfg, device, timings)
+        g = self._pipeline(pert_data, a0, device, timings)
         self._save(g)
-        logger.info("GSR graph cached at %s", self.cache_path)
+        logger.info("%s graph cached at %s", self.LABEL, self.cache_path)
         return g

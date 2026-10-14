@@ -129,13 +129,20 @@ def prepare(cfg: LasserConfig, pert_data=None, tracker: Optional[RunTracker] = N
         tracker.save_split(pert_data)
 
     graph = None
-    if cfg.graph_learning:
+    if cfg.graph_learning and cfg.graph_mode == "gsr":
         from .graph import GSRCoexpressProvider
 
         with phase("gsr_graph", timings), capture_stderr(lines, gears_log):
             provider = GSRCoexpressProvider(cfg)
             graph = provider.build(pert_data, device, timings)
             timings["gsr_graph_from_cache"] = provider.from_cache
+    elif cfg.graph_learning and cfg.graph_mode == "vae":
+        from .vae import VAECoexpressProvider
+
+        with phase("vae_graph", timings), capture_stderr(lines, gears_log):
+            provider = VAECoexpressProvider(cfg)
+            graph = provider.build(pert_data, device, timings)
+            timings["vae_graph_from_cache"] = provider.from_cache
 
     seed_everything(cfg.rng_seed, cfg.deterministic)
     from .gears import GEARS
@@ -146,7 +153,16 @@ def prepare(cfg: LasserConfig, pert_data=None, tracker: Optional[RunTracker] = N
         if graph is not None:
             kwargs.update(G_coexpress=graph.edge_index, G_coexpress_weight=graph.edge_weight)
         gears_obj.model_initialize(**kwargs)
-    if cfg.fix_coexpress_batching:
+    if cfg.cell_signal:   # implies the batching fix (validated in config)
+        import copy as _copy
+
+        from .cellsignal import enable_cell_signal
+
+        n = enable_cell_signal(gears_obj.model, gears_obj.num_genes, cfg.rng_seed)
+        gears_obj.best_model = _copy.deepcopy(gears_obj.model)   # as model_initialize does
+        logger.info("cell-signal variant ON (with batching fix): %d co-expression SGConv layer(s) now see each "
+                    "cell's control expression, so graph messages are cell-specific", n)
+    elif cfg.fix_coexpress_batching:
         from .batching import enable_batched_coexpress
 
         for m in (gears_obj.model, gears_obj.best_model):
@@ -200,7 +216,8 @@ def _train_evaluate_save(ctx: RunContext, tracker: RunTracker) -> Dict[str, Any]
                                                         tracker.config_hash))
         ctx.graph.edits.to_csv(tracker.path("graphs", "edits.csv"), index=False)
         write_json(tracker.path("graphs", "checks.json"), ctx.graph.checks)
-        tracker.save_checkpoint("gsr_encoders.pt", {"encoder_state": ctx.graph.encoder_state,
+        ckpt = "gsr_encoders.pt" if cfg.graph_mode == "gsr" else "vae_model.pt"
+        tracker.save_checkpoint(ckpt, {"encoder_state": ctx.graph.encoder_state,
                                                     "embeddings": ctx.graph.embeddings,
                                                     "history": ctx.graph.info.get("history")})
 
@@ -234,12 +251,22 @@ def _train_evaluate_save(ctx: RunContext, tracker: RunTracker) -> Dict[str, Any]
         "run_id": tracker.run_id, "timestamp": tracker.started, "dataset": cfg.dataset, "split": cfg.split,
         "seed": cfg.seed, "train_seed": cfg.rng_seed, "graph_learning": cfg.graph_learning,
         "fix_coexpress_batching": cfg.fix_coexpress_batching, "gsr_init_gene_emb": cfg.gsr_init_gene_emb,
+        "graph_mode": cfg.graph_mode if cfg.graph_learning else None, "cell_signal": cfg.cell_signal,
         "epochs": cfg.epochs, "subsample_cells_per_condition": cfg.subsample_cells_per_condition,
         "run_tag": cfg.run_tag, "device": describe_device(ctx.device), "config_hash": tracker.config_hash, "split_hash": tracker.split_hash,
         "graph_source": source, **{f"graph_{k}": v for k, v in rec["stats"].items()},
     }
     if ctx.graph is not None:
         h2 = ctx.graph.checks.get("h2", {})
+        row.update({"graph_cache_key": cfg.graph_cache_key(),
+                    "graph_h2_hit_added": h2.get("hit_rate_added"),
+                    "graph_h2_hit_random": h2.get("hit_rate_degree_matched_random")})
+    if ctx.graph is not None and cfg.graph_mode == "vae":
+        vc = ctx.graph.checks.get("vae", {})
+        row.update({"vae_from_cache": ctx.timings.get("vae_graph_from_cache"),
+                    "vae_heldout_r2": vc.get("heldout_h2_r2"), "vae_active_dims": vc.get("active_latent_dims"),
+                    "vae_edge_confidence": ctx.graph.checks.get("refine", {}).get("confidence_mean")})
+    if ctx.graph is not None and cfg.graph_mode == "gsr":
         row.update({"gsr_cache_key": cfg.gsr_cache_key(),
                     "gsr_from_cache": ctx.timings.get("gsr_graph_from_cache"),
                     "gsr_link_auc": ctx.graph.checks.get("pretrain", {}).get("best_link_auc"),
@@ -250,7 +277,7 @@ def _train_evaluate_save(ctx: RunContext, tracker: RunTracker) -> Dict[str, Any]
     row["train_seconds"] = ctx.timings.get("gears_train", {}).get("seconds")
     row["train_peak_cuda_gb"] = ctx.timings.get("gears_train", {}).get("peak_cuda_gb")
     row["gsr_peak_cuda_gb"] = max((v.get("peak_cuda_gb", 0) for k, v in ctx.timings.items()
-                                   if k.startswith("gsr") and isinstance(v, dict)), default=None)
+                                   if k.startswith(("gsr", "vae")) and isinstance(v, dict)), default=None)
     row["run_dir"] = tracker.run_dir
     tracker.append_runs_csv(row)
 

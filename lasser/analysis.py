@@ -465,7 +465,7 @@ def consensus_edges(runs: pd.DataFrame, arm: str = "LASSER", min_splits: int = 3
     r0 = runs[runs.arm == arm].iloc[0]
     genes = _pkl(r0.run_dir, "graphs/coexpress_graph.pkl")["gene_list"]
     knn = set()
-    for r in runs[runs.arm.isin(["GEARS-kNN8", "GEARS-kNN8-fix"])].itertuples():
+    for r in runs[runs.arm.str.startswith("GEARS-kNN8")].itertuples():
         g = _pkl(r.run_dir, "graphs/coexpress_graph.pkl")
         s, d = g["edge_index"]
         knn |= set(zip(np.minimum(s, d).tolist(), np.maximum(s, d).tolist()))
@@ -476,10 +476,18 @@ def consensus_edges(runs: pd.DataFrame, arm: str = "LASSER", min_splits: int = 3
     return c[["gene_u", "gene_v", "n_splits", "mean_score", "in_knn8", "u", "v"]]
 
 
+def knn_arm_for(arm: str) -> str:
+    """The density-matched Pearson arm of the same family: ``X-fix`` -> ``GEARS-kNN8-fix``, ``X-cs`` -> ``GEARS-kNN8-cs``."""
+    for suffix in ("-fix", "-cs"):
+        if arm.endswith(suffix):
+            return "GEARS-kNN8" + suffix
+    return "GEARS-kNN8"
+
+
 def overlap_with_knn8(runs: pd.DataFrame, arm: str = "LASSER") -> pd.DataFrame:
     """Per split: share of the arm's new edges that the density-matched Pearson graph also has."""
     rows = []
-    knn_arm = "GEARS-kNN8-fix" if arm.endswith("-fix") else "GEARS-kNN8"
+    knn_arm = knn_arm_for(arm)
     for r in runs[runs.arm == arm].drop_duplicates("seed").itertuples():
         k = runs[(runs.arm == knn_arm) & (runs.seed == r.seed)]
         if k.empty:

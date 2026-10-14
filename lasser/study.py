@@ -60,6 +60,15 @@ ARMS: Dict[str, Dict[str, Any]] = {
     "GEARS-kNN8-fix": dict(graph_learning=False, fix_coexpress_batching=True, coexpress_threshold=0.0,
                            num_similar_genes_co_express_graph=8),
     "LASSER-random-fix": dict(graph_learning=True, fix_coexpress_batching=True, gsr=dict(edge_control="random")),
+    # VAE graph learning + the cell-signal GEARS variant (graph messages carry each cell's expression)
+    "GEARS-cs": dict(graph_learning=False, fix_coexpress_batching=True, cell_signal=True),
+    "VAE-cs": dict(graph_learning=True, graph_mode="vae", fix_coexpress_batching=True, cell_signal=True),
+    "VAE-random-cs": dict(graph_learning=True, graph_mode="vae", fix_coexpress_batching=True, cell_signal=True,
+                          vae=dict(edge_control="random")),
+    "GEARS-kNN8-cs": dict(graph_learning=False, fix_coexpress_batching=True, cell_signal=True,
+                          coexpress_threshold=0.0, num_similar_genes_co_express_graph=8),
+    "LASSER-cs": dict(graph_learning=True, graph_mode="gsr", fix_coexpress_batching=True, cell_signal=True),
+    "VAE-fix": dict(graph_learning=True, graph_mode="vae", fix_coexpress_batching=True),
 }
 
 ARM_DESCRIPTIONS = {
@@ -77,7 +86,35 @@ ARM_DESCRIPTIONS = {
     "LASSER-fix": "LASSER graph + batching fix",
     "GEARS-kNN8-fix": "density-matched Pearson kNN-8 graph + batching fix",
     "LASSER-random-fix": "LASSER graph with new edges rewired at random + batching fix",
+    "GEARS-cs": "cell-signal GEARS variant on GEARS's Pearson graph (baseline for the VAE study)",
+    "VAE-cs": "VAE-learned graph + cell-signal variant",
+    "VAE-random-cs": "VAE graph with new edges rewired at random (same in-degrees/weights) + cell signal",
+    "GEARS-kNN8-cs": "density-matched Pearson kNN-8 graph + cell signal",
+    "LASSER-cs": "GSR-learned graph + cell signal (GSR vs VAE)",
+    "VAE-fix": "VAE graph in GEARS's original slot (batching fix, no cell signal): expected null",
 }
+
+# VAE study (10-hour sessions, 10 epochs): priority tiers, interleaved by split.
+VAE_PLAN: List[Tuple[str, Sequence[int], Optional[Sequence[int]]]] = [
+    # 1. the claim: VAE graph vs Pearson graph, both in the cell-signal variant
+    ("GEARS-cs", [1], None), ("VAE-cs", [1], None),
+    ("GEARS-cs", [2], None), ("VAE-cs", [2], None),
+    ("GEARS-cs", [3], None), ("VAE-cs", [3], None),
+    # 2. key control: same in-degrees and weights, random partners
+    ("VAE-random-cs", [1, 2, 3], None),
+    # 3. density-matched Pearson graph
+    ("GEARS-kNN8-cs", [1, 2, 3], None),
+    # 4. VAE vs GSR graph (same variant)
+    ("LASSER-cs", [1, 2, 3], None),
+    # 5. VAE graph in GEARS's original slot (tests the "slot can't matter" prediction)
+    ("VAE-fix", [1, 2, 3], None),
+    # 6. training-seed replicates of the core pair
+    ("GEARS-cs", [1], [101]), ("VAE-cs", [1], [101]),
+    ("GEARS-cs", [2], [101]), ("VAE-cs", [2], [101]),
+    ("GEARS-cs", [3], [101]), ("VAE-cs", [3], [101]),
+    # 7. more splits
+    ("GEARS-cs", [4, 5], None), ("VAE-cs", [4, 5], None), ("VAE-random-cs", [4, 5], None),
+]
 
 # Option 1 study (10-hour Kaggle sessions, 10 epochs per arm): tiers in priority order,
 # splits interleaved so whatever finishes is a complete paired set. Entries are
@@ -125,9 +162,11 @@ def run_tag(arm: str, seed: int, train_seed: Optional[int] = None) -> str:
 def arm_config(arm: str, seed: int, base: Dict[str, Any], train_seed: Optional[int] = None) -> LasserConfig:
     over = copy.deepcopy(ARMS[arm])
     gsr_over = over.pop("gsr", {})
+    vae_over = over.pop("vae", {})
     d = LasserConfig(**base).to_dict()
     d.update(over)
     d["gsr"].update(gsr_over)
+    d["vae"].update(vae_over)
     d["seed"] = seed
     d["train_seed"] = train_seed
     d["run_tag"] = run_tag(arm, seed, train_seed)
